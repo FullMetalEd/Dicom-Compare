@@ -116,6 +116,11 @@ class DicomComparator:
         Returns:
             InstanceComparison with all differences
         """
+        #if len(baseline.tags) == 0:
+        #    console.print(f"⚠️  Baseline instance {baseline.sop_instance_uid} has no tags!", style="yellow")
+        #if len(comparison.tags) == 0:
+        #   console.print(f"⚠️  Comparison instance {comparison.sop_instance_uid} has no tags!", style="yellow")
+        
         tag_differences = []
         
         # Get all unique tags from both instances
@@ -181,3 +186,11 @@ class DicomComparator:
             tag_differences=tag_differences,
             is_perfect_match=is_perfect_match
         )
+    def debug_instance_tags(self, instance: DicomInstance, max_tags: int = 10) -> None:
+        """Debug function to show tags in an instance"""
+        console.print(f"Debug tags for {instance.sop_instance_uid}:", style="cyan")
+        for i, (tag, value) in enumerate(instance.tags.items()):
+            if i >= max_tags:
+                console.print(f"   ... and {len(instance.tags) - max_tags} more tags", style="dim")
+                break
+            console.print(f"   {tag}: {str(value)[:100]}{'...' if len(str(value)) > 100 else ''}", style="dim")

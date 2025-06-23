@@ -31,7 +31,8 @@ class DicomStudy:
 class DicomLoader:
     """Loads and organizes DICOM files into hierarchical structure"""
     
-    def __init__(self):
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
         self.failed_files = []
     
     def load_dicom_files(self, root_path: Path, source_file_name: str) -> Dict[str, DicomStudy]:
@@ -207,3 +208,59 @@ class DicomLoader:
         
         # Add instance to series
         series.instances[instance.sop_instance_uid] = instance
+
+    def load_dicom_files(self, root_path: Path, source_file_name: str) -> Dict[str, DicomStudy]:
+        """Load all DICOM files from directory and organize by Study -> Series -> Instance"""
+        from dicom_extractor import DicomExtractor
+        
+        # Find all DICOM files
+        extractor = DicomExtractor(verbose=self.verbose)
+        dicom_files = extractor.find_dicom_files(root_path)
+        
+        studies = {}
+        self.failed_files = []
+        successful_loads = 0
+        
+        # Load each DICOM file
+        for i, file_path in enumerate(dicom_files):
+            try:
+                if self.verbose:
+                    console.print(f"   Loading {i+1}/{len(dicom_files)}: {file_path.name}...", style="dim")
+                
+                dicom_instance = self._load_dicom_file(file_path, source_file_name)
+                if dicom_instance:
+                    self._organize_instance(dicom_instance, studies)
+                    successful_loads += 1
+                    if self.verbose:
+                        console.print(f"   ✅ Loaded: {dicom_instance.sop_instance_uid}", style="green")
+                elif self.verbose:
+                    console.print(f"   ❌ Failed to create instance from {file_path.name}", style="red")
+                    
+            except Exception as e:
+                self.failed_files.append((file_path, str(e)))
+                if self.verbose:
+                    console.print(f"   ❌ Failed to load {file_path.name}: {str(e)}", style="red")
+        
+        if self.verbose:
+            console.print(f"📊 Successfully loaded {successful_loads} instances", style="green")
+            
+            if self.failed_files:
+                console.print(f"⚠️  {len(self.failed_files)} files failed to load:", style="yellow")
+                for failed_file, error in self.failed_files[:3]:
+                    console.print(f"     {failed_file.name}: {error}", style="dim")
+                if len(self.failed_files) > 3:
+                    console.print(f"     ... and {len(self.failed_files) - 3} more failures", style="dim")
+            
+            # Debug: Show what we loaded
+            total_instances = 0
+            for study_uid, study in studies.items():
+                study_instances = sum(len(series.instances) for series in study.series.values())
+                total_instances += study_instances
+                console.print(f"   📁 Study {study_uid[:30]}...: {len(study.series)} series, {study_instances} instances", style="cyan")
+            
+            console.print(f"🎯 Total organized instances: {total_instances}", style="bold green")
+        elif self.failed_files:
+            # Always show failures even in non-verbose mode
+            console.print(f"⚠️  {len(self.failed_files)} files failed to load", style="yellow")
+        
+        return studies
