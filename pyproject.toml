@@ -3,23 +3,31 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dicomcompare"
+name = "dicom-compare"
 version = "0.1.0"
-description = "Compare DICOM studies from different ZIP exports"
+description = "Compare DICOM studies from different ZIP exports to identify differences"
+readme = "README.md"
+license = {text = "MIT"}
 authors = [
     {name = "Ed"},
 ]
-dependencies = [
-    "numpy>=2.2.3",
-    "openpyxl>=3.1.5",
-    "pandas>=2.3.0",
-    "pydicom>=3.0.1",
-    "typer>=0.16.0",
-]
 requires-python = ">=3.12"
+dependencies = [
+    "pydicom>=2.4.0",
+    "typer[all]>=0.9.0",
+    "pandas>=2.0.0",
+    "rich>=13.0.0",
+    "openpyxl>=3.1.0",
+    "matplotlib>=3.7.0",
+]
 
 [project.scripts]
-dicomcompare = "dicomcompare.main:app"
+dicom-compare = "dicom_compare.main:app"  # Fixed: underscore to match directory name
+
+[project.urls]
+Homepage = "https://github.com/yourusername/dicom-compare"
+Repository = "https://github.com/yourusername/dicom-compare"
+Issues = "https://github.com/yourusername/dicom-compare/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dicomcompare"]
+packages = ["dicom_compare"]
