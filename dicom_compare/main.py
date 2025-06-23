@@ -22,11 +22,11 @@ except ImportError as e:
     console = Console()  # Create console here for error message
     console.print(f"⚠️  Excel dependencies not available: {e}", style="yellow")
 
-from dicom_extractor import DicomExtractor, ExtractionStats
-from dicom_loader import DicomLoader
-from dicom_comparator import DicomComparator
-from models import ComparisonSummary, FileComparisonResult
-from utils import validate_inputs, create_temp_dir, cleanup_temp_dirs
+from dicom_compare.dicom_extractor import DicomExtractor, ExtractionStats
+from dicom_compare.dicom_loader import DicomLoader
+from dicom_compare.dicom_comparator import DicomComparator
+from dicom_compare.models import ComparisonSummary, FileComparisonResult
+from dicom_compare.utils import validate_inputs, create_temp_dir, cleanup_temp_dirs
 
 app = typer.Typer(
     name="dicomcompare",

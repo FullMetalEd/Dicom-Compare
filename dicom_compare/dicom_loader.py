@@ -6,7 +6,7 @@ from collections import defaultdict
 from rich.console import Console
 from rich.progress import track
 
-from models import DicomInstance
+from dicom_compare.models import DicomInstance
 
 console = Console()
 

@@ -2,11 +2,11 @@ from typing import Dict, List, Set, Any
 from collections import defaultdict
 from rich.console import Console
 
-from models import (
+from dicom_compare.models import (
     DicomInstance, TagDifference, InstanceComparison, 
     FileComparisonResult, DifferenceType, ComparisonSummary
 )
-from dicom_loader import DicomStudy
+from dicom_compare.dicom_loader import DicomStudy
 
 console = Console()
 
