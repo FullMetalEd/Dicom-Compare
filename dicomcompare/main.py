@@ -5,12 +5,27 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import print as rprint
-import pandas as pd
+from collections import defaultdict, Counter
+
+# Excel availability check
+try:
+    import pandas as pd
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import PieChart, BarChart, Reference
+    from openpyxl.chart.series import DataPoint, SeriesLabel
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    EXCEL_AVAILABLE = True
+except ImportError as e:
+    EXCEL_AVAILABLE = False
+    pd = None
+    console = Console()  # Create console here for error message
+    console.print(f"⚠️  Excel dependencies not available: {e}", style="yellow")
 
 from dicom_extractor import DicomExtractor, ExtractionStats
 from dicom_loader import DicomLoader
 from dicom_comparator import DicomComparator
-from models import ComparisonSummary, FileComparisonResult  # Added missing import
+from models import ComparisonSummary, FileComparisonResult
 from utils import validate_inputs, create_temp_dir, cleanup_temp_dirs
 
 app = typer.Typer(
@@ -20,6 +35,7 @@ app = typer.Typer(
 )
 
 console = Console()
+
 
 @app.command()
 def inspect(
@@ -640,12 +656,549 @@ def generate_csv_report(summary: ComparisonSummary, report_path: Path) -> None:
     df = pd.DataFrame(rows)
     df.to_csv(report_path, index=False)
 
-def generate_excel_report(summary: ComparisonSummary, report_path: Path) -> None:
-    """Generate Excel report with multiple sheets"""
-    # This will be implemented in the stretch goal phase
-    console.print("📊 Excel reporting not yet implemented - generating CSV instead", style="yellow")
-    csv_path = report_path.with_suffix('.csv')
-    generate_csv_report(summary, csv_path)
+def generate_excel_report(summary: 'ComparisonSummary', report_path: Path) -> None:
+    """Generate comprehensive Excel report with charts and summary data"""
+    #if not EXCEL_AVAILABLE:
+    #    console.print("📊 Excel dependencies not available - generating CSV instead", style="yellow")
+    #    csv_path = report_path.with_suffix('.csv')
+    #    generate_csv_report(summary, csv_path)
+    #    return
+    
+    try:
+        console.print("📊 Creating Excel report with charts...", style="cyan")
+        
+        # Create workbook
+        wb = openpyxl.Workbook()
+        
+        # Remove default sheet
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
+        
+        # Create worksheets
+        summary_ws = wb.create_sheet("Executive Summary")
+        comparison_ws = wb.create_sheet("Comparison Results")
+        tag_analysis_ws = wb.create_sheet("Tag Analysis")
+        detailed_ws = wb.create_sheet("Detailed Differences")
+        
+        # Generate each worksheet
+        _create_summary_worksheet(summary_ws, summary, wb)
+        _create_comparison_worksheet(comparison_ws, summary)
+        _create_tag_analysis_worksheet(tag_analysis_ws, summary)
+        _create_detailed_worksheet(detailed_ws, summary)
+        
+        # Save workbook
+        wb.save(report_path)
+        console.print(f"✅ Excel report saved: {report_path}", style="green")
+        
+    except Exception as e:
+        console.print(f"📊 Excel generation failed: {e} - generating CSV instead", style="yellow")
+        csv_path = report_path.with_suffix('.csv')
+        generate_csv_report(summary, csv_path)
+
+def _auto_adjust_column_widths(ws, min_width: int = 10, max_width: int = 60) -> None:
+    """
+    Enhanced auto-adjust column widths based on content
+    """
+    # Dictionary to track the maximum content length per column
+    column_widths = {}
+    
+    # Iterate through all rows and columns to find content
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is not None:
+                column_letter = cell.column_letter
+                
+                # Convert value to string and measure length
+                cell_value = str(cell.value)
+                
+                # Add extra space for headers and bold text
+                if cell.font and cell.font.bold:
+                    content_length = len(cell_value) + 4  # Extra padding for headers
+                elif cell.font and cell.font.size and cell.font.size > 12:
+                    content_length = len(cell_value) + 2  # Extra padding for large text
+                else:
+                    content_length = len(cell_value)
+                
+                # Track the maximum width needed for this column
+                if column_letter not in column_widths:
+                    column_widths[column_letter] = content_length
+                else:
+                    column_widths[column_letter] = max(column_widths[column_letter], content_length)
+    
+    # Apply the calculated widths
+    for column_letter, width in column_widths.items():
+        # Apply min/max constraints
+        final_width = max(min_width, min(width + 5, max_width))  # +2 for padding
+        ws.column_dimensions[column_letter].width = final_width
+        
+        # Optional: Show what widths are being applied
+        #if ws.title == "Executive Summary":  # Only show for summary sheet
+        #    console.print(f"   📏 Column {column_letter}: {final_width} chars", style="dim")
+
+def _create_summary_worksheet(ws, summary: 'ComparisonSummary', wb) -> None:
+    """Create executive summary worksheet with charts and auto-sized columns"""
+    # Set worksheet title
+    ws.title = "Executive Summary"
+    
+    # Header styling
+    header_font = Font(name='Calibri', size=16, bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='2F5597', end_color='2F5597', fill_type='solid')
+    subheader_font = Font(name='Calibri', size=12, bold=True, color='2F5597')
+    
+    # Title
+    ws['A1'] = "DICOM Comparison Report - Executive Summary"
+    ws['A1'].font = Font(name='Calibri', size=18, bold=True, color='2F5597')
+    ws.merge_cells('A1:H1')
+    
+    # Basic information section
+    ws['A3'] = "Report Information"
+    ws['A3'].font = subheader_font
+    
+    info_data = [
+        ("Baseline File:", Path(summary.baseline_file).name),
+        ("Comparison Files:", f"{len(summary.comparison_files)} files"),
+        ("Total Instances:", summary.total_instances),
+        ("Total Studies:", summary.total_studies),
+        ("Generated:", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+    ]
+    
+    for idx, (label, value) in enumerate(info_data, 4):
+        ws.cell(row=idx, column=1, value=label).font = Font(bold=True)
+        ws.cell(row=idx, column=2, value=value)
+    
+    # Comparison Summary Table
+    ws['A9'] = "Comparison Summary"
+    ws['A9'].font = subheader_font
+    
+    # Create summary table headers
+    headers = ["File Name", "Perfect Matches", "Tag Differences", "Missing Instances", "Extra Instances", "Data Integrity %"]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=10, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center')
+    
+    # Populate summary data with better formatting
+    for row_idx, result in enumerate(summary.file_results, 11):
+        perfect_matches = sum(1 for comp in result.matched_instances if comp.is_perfect_match)
+        tag_diffs = len(result.matched_instances) - perfect_matches
+        missing = len(result.missing_instances)
+        extra = len(result.extra_instances)
+        integrity = _calculate_data_integrity(result)
+        
+        # File name (truncated if too long)
+        file_name = Path(result.comparison_file).name
+        if len(file_name) > 30:
+            file_name = file_name[:27] + "..."
+        
+        ws.cell(row=row_idx, column=1, value=file_name)
+        ws.cell(row=row_idx, column=2, value=perfect_matches)
+        ws.cell(row=row_idx, column=3, value=tag_diffs)
+        ws.cell(row=row_idx, column=4, value=missing)
+        ws.cell(row=row_idx, column=5, value=extra)
+        
+        # Format integrity percentage with color coding
+        integrity_cell = ws.cell(row=row_idx, column=6, value=f"{integrity:.1f}%")
+        if integrity >= 95:
+            integrity_cell.fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+        elif integrity >= 85:
+            integrity_cell.fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')
+        else:
+            integrity_cell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    
+    # Add charts
+    try:
+        chart_start_row = len(summary.file_results) + 13
+        _add_data_integrity_chart(ws, summary, start_row=chart_start_row)
+        _add_comparison_breakdown_chart(ws, summary, start_row=chart_start_row, start_col=7)
+    except Exception as e:
+        console.print(f"⚠️  Chart creation failed: {e}", style="yellow")
+    
+    # Auto-adjust ALL column widths based on content
+    console.print("📏 Auto-sizing columns...", style="cyan")
+    _auto_adjust_column_widths(ws)
+
+def _add_data_integrity_chart(ws, summary: 'ComparisonSummary', start_row: int) -> None:
+    """Add data integrity pie chart"""
+    try:
+        chart = PieChart()
+        chart.title = "Data Integrity Overview"
+        chart.width = 15
+        chart.height = 10
+        
+        # Calculate overall integrity
+        total_perfect = 0
+        total_partial = 0
+        total_missing = 0
+        
+        for result in summary.file_results:
+            perfect_matches = sum(1 for comp in result.matched_instances if comp.is_perfect_match)
+            tag_diffs = len(result.matched_instances) - perfect_matches
+            missing = len(result.missing_instances)
+            
+            total_perfect += perfect_matches
+            total_partial += tag_diffs
+            total_missing += missing
+        
+        # Create data for chart
+        chart_data = [
+            ["Category", "Count"],
+            ["Perfect Match", total_perfect],
+            ["Tag Differences", total_partial],
+            ["Missing Instances", total_missing]
+        ]
+        
+        # Add data to worksheet
+        chart_start_row = start_row
+        for row_idx, row_data in enumerate(chart_data):
+            for col_idx, value in enumerate(row_data):
+                ws.cell(row=chart_start_row + row_idx, column=1 + col_idx, value=value)
+        
+        # Create chart reference
+        data_ref = Reference(ws, min_col=2, min_row=chart_start_row + 1, max_row=chart_start_row + len(chart_data) - 1)
+        labels_ref = Reference(ws, min_col=1, min_row=chart_start_row + 1, max_row=chart_start_row + len(chart_data) - 1)
+        
+        chart.add_data(data_ref, titles_from_data=False)
+        chart.set_categories(labels_ref)
+        
+        # Simplified color coding (skip if it causes issues)
+        try:
+            if chart.series and len(chart.series) > 0:
+                colors = ['00B050', 'FFC000', 'C5504B']  # Green, Orange, Red
+                series = chart.series[0]
+                for i, color in enumerate(colors):
+                    if i < len(chart_data) - 1:  # Skip header
+                        point = DataPoint(idx=i)
+                        point.graphicalProperties.solidFill = color
+                        series.data_points.append(point)
+        except Exception as color_error:
+            console.print(f"⚠️  Chart coloring skipped: {color_error}", style="dim")
+        
+        ws.add_chart(chart, f"A{start_row + 5}")
+        
+    except Exception as e:
+        console.print(f"⚠️  Pie chart creation failed: {e}", style="yellow")
+
+def _add_comparison_breakdown_chart(ws, summary: 'ComparisonSummary', start_row: int, start_col: int) -> None:
+    """Add comparison breakdown bar chart"""
+    try:
+        chart = BarChart()
+        chart.title = "File Comparison Breakdown"
+        chart.x_axis.title = "Files"
+        chart.y_axis.title = "Number of Instances"
+        chart.width = 15
+        chart.height = 10
+        
+        # Prepare data
+        file_names = []
+        perfect_matches = []
+        tag_diffs = []
+        missing_instances = []
+        
+        for result in summary.file_results:
+            file_names.append(Path(result.comparison_file).name[:15])  # Truncate long names
+            perfect_count = sum(1 for comp in result.matched_instances if comp.is_perfect_match)
+            perfect_matches.append(perfect_count)
+            tag_diffs.append(len(result.matched_instances) - perfect_count)
+            missing_instances.append(len(result.missing_instances))
+        
+        # Create data table with series labels in first column
+        chart_data = [
+            ["Series"] + ["Perfect Matches", "Tag Differences", "Missing Instances"],
+        ]
+        
+        # Add file data as columns
+        for i, file_name in enumerate(file_names):
+            chart_data.append([
+                file_name,
+                perfect_matches[i],
+                tag_diffs[i], 
+                missing_instances[i]
+            ])
+        
+        # Add data to worksheet
+        chart_start_col = start_col
+        for row_idx, row_data in enumerate(chart_data):
+            for col_idx, value in enumerate(row_data):
+                ws.cell(row=start_row + row_idx, column=chart_start_col + col_idx, value=value)
+        
+        # Create chart references
+        # Categories are the file names (first column, excluding header)
+        categories_ref = Reference(ws, 
+                                 min_col=chart_start_col, 
+                                 min_row=start_row + 1, 
+                                 max_row=start_row + len(file_names))
+        
+        # Data series are the columns (excluding first column and header)
+        data_ref = Reference(ws,
+                           min_col=chart_start_col + 1,
+                           min_row=start_row,
+                           max_col=chart_start_col + 3,  # 3 series columns
+                           max_row=start_row + len(file_names))
+        
+        chart.add_data(data_ref, titles_from_data=True)  # Use titles from data
+        chart.set_categories(categories_ref)
+        
+        # Add chart to worksheet
+        col_letter = openpyxl.utils.get_column_letter(start_col)
+        ws.add_chart(chart, f"{col_letter}{start_row + len(file_names) + 3}")
+        
+    except Exception as e:
+        console.print(f"⚠️  Bar chart creation failed: {e}", style="yellow")
+
+def _create_comparison_worksheet(ws, summary: 'ComparisonSummary') -> None:
+    """Create detailed comparison results worksheet"""
+    ws.title = "Comparison Results"
+    
+    # Create detailed comparison data
+    data = []
+    headers = ["File", "Total Instances", "Perfect Matches", "Perfect Match %", 
+              "Tag Differences", "Tag Diff %", "Missing Instances", "Missing %",
+              "Extra Instances", "Extra %", "Data Integrity %", "Quality Grade"]
+    data.append(headers)
+    
+    for result in summary.file_results:
+        perfect_matches = sum(1 for comp in result.matched_instances if comp.is_perfect_match)
+        tag_diffs = len(result.matched_instances) - perfect_matches
+        missing = len(result.missing_instances)
+        extra = len(result.extra_instances)
+        
+        total_baseline = result.total_instances_baseline
+        total_comparison = result.total_instances_comparison
+        
+        # Calculate percentages
+        perfect_pct = (perfect_matches / total_baseline * 100) if total_baseline > 0 else 0
+        tag_diff_pct = (tag_diffs / total_baseline * 100) if total_baseline > 0 else 0
+        missing_pct = (missing / total_baseline * 100) if total_baseline > 0 else 0
+        extra_pct = (extra / total_comparison * 100) if total_comparison > 0 else 0
+        integrity = _calculate_data_integrity(result)
+        
+        # Quality grade
+        if integrity >= 95:
+            grade = "A+"
+        elif integrity >= 90:
+            grade = "A"
+        elif integrity >= 85:
+            grade = "B+"
+        elif integrity >= 80:
+            grade = "B"
+        elif integrity >= 70:
+            grade = "C"
+        else:
+            grade = "D"
+        
+        row = [
+            Path(result.comparison_file).name,
+            total_comparison,
+            perfect_matches,
+            round(perfect_pct, 1),
+            tag_diffs,
+            round(tag_diff_pct, 1),
+            missing,
+            round(missing_pct, 1),
+            extra,
+            round(extra_pct, 1),
+            round(integrity, 1),
+            grade
+        ]
+        data.append(row)
+    
+    # Add data to worksheet
+    for row_idx, row_data in enumerate(data):
+        for col_idx, value in enumerate(row_data):
+            cell = ws.cell(row=row_idx + 1, column=col_idx + 1, value=value)
+            
+            # Header formatting
+            if row_idx == 0:
+                cell.font = Font(bold=True, color='FFFFFF')
+                cell.fill = PatternFill(start_color='2F5597', end_color='2F5597', fill_type='solid')
+                cell.alignment = Alignment(horizontal='center')
+            
+            # Conditional formatting for quality grades
+            elif col_idx == 11:  # Quality grade column
+                if value in ['A+', 'A']:
+                    cell.fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+                elif value in ['B+', 'B']:
+                    cell.fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    
+    # Auto-adjust column widths
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 20)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+def _create_tag_analysis_worksheet(ws, summary: 'ComparisonSummary') -> None:
+    """Create tag analysis worksheet"""
+    from collections import defaultdict  # Import here for safety
+    
+    ws.title = "Tag Analysis"
+    
+    # Collect tag statistics
+    tag_stats = defaultdict(lambda: {'missing': 0, 'extra': 0, 'value_diff': 0, 'type_diff': 0})
+    
+    for result in summary.file_results:
+        for instance_comp in result.matched_instances:
+            if not instance_comp.is_perfect_match:
+                for tag_diff in instance_comp.tag_differences:
+                    tag_name = tag_diff.tag_keyword
+                    diff_type = tag_diff.difference_type.value
+                    
+                    if diff_type == 'MISSING_TAG':
+                        tag_stats[tag_name]['missing'] += 1
+                    elif diff_type == 'EXTRA_TAG':
+                        tag_stats[tag_name]['extra'] += 1
+                    elif diff_type == 'VALUE_DIFF':
+                        tag_stats[tag_name]['value_diff'] += 1
+                    elif diff_type == 'TYPE_DIFF':
+                        tag_stats[tag_name]['type_diff'] += 1
+    
+    # Create data
+    headers = ["Tag Name", "Missing Count", "Extra Count", "Value Changed", "Type Changed", "Total Affected", "Impact Level"]
+    data = [headers]
+    
+    # Sort by total impact
+    sorted_tags = sorted(tag_stats.items(), key=lambda x: sum(x[1].values()), reverse=True)
+    
+    for tag_name, stats in sorted_tags:
+        total_affected = sum(stats.values())
+        
+        # Determine impact level
+        if total_affected > 100:
+            impact = "High"
+        elif total_affected > 20:
+            impact = "Medium"
+        else:
+            impact = "Low"
+        
+        row = [
+            tag_name,
+            stats['missing'],
+            stats['extra'],
+            stats['value_diff'],
+            stats['type_diff'],
+            total_affected,
+            impact
+        ]
+        data.append(row)
+    
+    # Add to worksheet with formatting
+    for row_idx, row_data in enumerate(data):
+        for col_idx, value in enumerate(row_data):
+            cell = ws.cell(row=row_idx + 1, column=col_idx + 1, value=value)
+            
+            if row_idx == 0:  # Header
+                cell.font = Font(bold=True, color='FFFFFF')
+                cell.fill = PatternFill(start_color='2F5597', end_color='2F5597', fill_type='solid')
+                cell.alignment = Alignment(horizontal='center')
+            elif col_idx == 6:  # Impact level
+                if value == "High":
+                    cell.fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+                elif value == "Medium":
+                    cell.fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+    
+    # Auto-adjust columns
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 25)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+def _create_detailed_worksheet(ws, summary: 'ComparisonSummary') -> None:
+    """Create detailed differences worksheet (same as CSV data)"""
+    ws.title = "Detailed Differences"
+    
+    # Create detailed differences data (same as CSV)
+    rows = []
+    headers = ['ReportType', 'BaselineFile', 'ComparisonFile', 'SOPInstanceUID', 'TagName', 'TagKeyword', 'BaselineValue', 'ComparisonValue', 'DifferenceType', 'VR']
+    rows.append(headers)
+    
+    for result in summary.file_results:
+        # Add missing instances
+        for missing_instance in result.missing_instances:
+            rows.append([
+                'MISSING_INSTANCE',
+                Path(result.baseline_file).name,
+                Path(result.comparison_file).name,
+                missing_instance.sop_instance_uid,
+                'MISSING_INSTANCE',
+                'MISSING_INSTANCE',
+                'EXISTS',
+                'MISSING',
+                'MISSING_INSTANCE',
+                'INSTANCE'
+            ])
+        
+        # Add extra instances
+        for extra_instance in result.extra_instances:
+            rows.append([
+                'EXTRA_INSTANCE',
+                Path(result.baseline_file).name,
+                Path(result.comparison_file).name,
+                extra_instance.sop_instance_uid,
+                'EXTRA_INSTANCE',
+                'EXTRA_INSTANCE',
+                'MISSING',
+                'EXISTS',
+                'EXTRA_INSTANCE',
+                'INSTANCE'
+            ])
+        
+        # Add tag differences
+        for instance_comp in result.matched_instances:
+            if not instance_comp.is_perfect_match:
+                for tag_diff in instance_comp.tag_differences:
+                    rows.append([
+                        'TAG_DIFFERENCE',
+                        Path(result.baseline_file).name,
+                        Path(result.comparison_file).name,
+                        instance_comp.sop_instance_uid,
+                        tag_diff.tag_name,
+                        tag_diff.tag_keyword,
+                        str(tag_diff.baseline_value) if tag_diff.baseline_value is not None else 'NULL',
+                        str(tag_diff.comparison_value) if tag_diff.comparison_value is not None else 'NULL',
+                        tag_diff.difference_type.value,
+                        tag_diff.vr
+                    ])
+    
+    # Add to worksheet
+    for row_idx, row_data in enumerate(rows):
+        for col_idx, value in enumerate(row_data):
+            cell = ws.cell(row=row_idx + 1, column=col_idx + 1, value=value)
+            
+            if row_idx == 0:  # Header
+                cell.font = Font(bold=True, color='FFFFFF')
+                cell.fill = PatternFill(start_color='2F5597', end_color='2F5597', fill_type='solid')
+                cell.alignment = Alignment(horizontal='center')
+    
+    # Auto-adjust columns
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 30)
+        ws.column_dimensions[column_letter].width = adjusted_width
 
 if __name__ == "__main__":
     app()
