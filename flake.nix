@@ -30,6 +30,7 @@
             rich
             openpyxl
             matplotlib
+            numpy
           ];
 
           # Skip tests for now
@@ -71,6 +72,7 @@
             rich
             openpyxl
             matplotlib
+            numpy
           ]);
 
           shellHook = ''

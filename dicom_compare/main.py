@@ -27,6 +27,7 @@ from dicom_compare.dicom_loader import DicomLoader
 from dicom_compare.dicom_comparator import DicomComparator
 from dicom_compare.models import ComparisonSummary, FileComparisonResult
 from dicom_compare.utils import validate_inputs, create_temp_dir, cleanup_temp_dirs
+from dicom_compare.image_command import run_image_comparison
 
 app = typer.Typer(
     name="dicomcompare",
@@ -36,6 +37,46 @@ app = typer.Typer(
 
 console = Console()
 
+@app.command("image")
+def compare_images(
+    files: List[Path] = typer.Option(
+        ..., 
+        "-f", 
+        "--file", 
+        help="ZIP files to compare (first file is baseline, minimum 2 files required)"
+    ),
+    report: Optional[Path] = typer.Option(
+        None,
+        "-r",
+        "--report",
+        help="Path to save image comparison report (CSV/Excel format)"
+    ),
+    tolerance: float = typer.Option(
+        0.0,
+        "-t",
+        "--tolerance",
+        help="Tolerance for pixel differences (0.0 = exact match, higher = more tolerant)"
+    ),
+    normalize: bool = typer.Option(
+        True,
+        "--normalize/--no-normalize",
+        help="Apply DICOM normalization (rescale slope/intercept, window/level)"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "-v",
+        "--verbose",
+        help="Enable verbose output"
+    )
+):
+    """
+    Compare DICOM image pixel data between studies.
+    
+    This command compares the actual pixel values of DICOM images rather than 
+    just the metadata tags. Useful for validating that image data is preserved 
+    across different export methods.
+    """
+    run_image_comparison(files, report, tolerance, normalize, verbose)
 
 @app.command()
 def inspect(
