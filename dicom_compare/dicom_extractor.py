@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 from rich.console import Console
+import pydicom
 
 console = Console()
 
@@ -209,7 +210,6 @@ class DicomExtractor:
                 # Method 4: Try pydicom parse
                 f.seek(0)
                 try:
-                    import pydicom
                     ds = pydicom.dcmread(f, stop_before_pixels=True, force=True)
                     if hasattr(ds, 'SOPInstanceUID') or hasattr(ds, 'StudyInstanceUID'):
                         if self.verbose:

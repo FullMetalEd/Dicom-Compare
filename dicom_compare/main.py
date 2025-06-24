@@ -71,7 +71,6 @@ def inspect(
                 console.print(f"\n✅ Found {len(dicom_files)} DICOM files", style="green")
                 
                 # Group by directory
-                from collections import defaultdict
                 by_directory = defaultdict(list)
                 for dicom_file in dicom_files:
                     relative_path = dicom_file.relative_to(extracted_path)
@@ -89,7 +88,7 @@ def inspect(
                 console.print(f"\n🔍 Checking DICOM content:", style="cyan")
                 for i, dicom_file in enumerate(dicom_files[:5]):  # Check first 5
                     try:
-                        import pydicom
+
                         ds = pydicom.dcmread(dicom_file, stop_before_pixels=True)
                         sop_uid = getattr(ds, 'SOPInstanceUID', 'MISSING')
                         series_uid = getattr(ds, 'SeriesInstanceUID', 'MISSING')
@@ -423,7 +422,6 @@ def _display_detailed_breakdown(summary: 'ComparisonSummary', console: Console) 
 
 def _display_tag_analysis(summary: 'ComparisonSummary', console: Console) -> None:
     """Display tag-level analysis"""
-    from collections import defaultdict, Counter
     
     # Collect tag difference statistics
     tag_stats = defaultdict(lambda: {'missing': 0, 'extra': 0, 'value_diff': 0, 'type_diff': 0})
@@ -1038,7 +1036,6 @@ def _create_comparison_worksheet(ws, summary: 'ComparisonSummary') -> None:
 
 def _create_tag_analysis_worksheet(ws, summary: 'ComparisonSummary') -> None:
     """Create tag analysis worksheet"""
-    from collections import defaultdict  # Import here for safety
     
     ws.title = "Tag Analysis"
     

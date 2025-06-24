@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.progress import track
 
 from dicom_compare.models import DicomInstance
+from dicom_compare.dicom_extractor import DicomExtractor
 
 console = Console()
 
@@ -45,8 +46,7 @@ class DicomLoader:
             
         Returns:
             Dictionary of studies keyed by StudyInstanceUID
-        """
-        from dicom_extractor import DicomExtractor
+        """  
         
         # Find all DICOM files
         extractor = DicomExtractor()
@@ -211,7 +211,6 @@ class DicomLoader:
 
     def load_dicom_files(self, root_path: Path, source_file_name: str) -> Dict[str, DicomStudy]:
         """Load all DICOM files from directory and organize by Study -> Series -> Instance"""
-        from dicom_extractor import DicomExtractor
         
         # Find all DICOM files
         extractor = DicomExtractor(verbose=self.verbose)
