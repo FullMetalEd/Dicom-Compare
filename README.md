@@ -1,124 +1,200 @@
 # DICOM Compare Tool
 
-A powerful CLI tool for comparing DICOM studies from different ZIP exports to identify differences and troubleshoot export inconsistencies.
+A powerful CLI tool for comparing DICOM studies from different ZIP exports to identify differences and troubleshoot export inconsistencies at both metadata and pixel data levels.
 
 ## Overview
 
-The DICOM Compare tool helps medical imaging professionals and DICOM system administrators compare DICOM studies exported from different systems or using different export methodologies. This is particularly useful for:
+The DICOM Compare tool helps medical imaging professionals and DICOM system administrators validate DICOM exports by comparing studies from different systems or export methodologies. This is particularly useful for:
 
-- **Troubleshooting export functionality** - Identify which tags differ between export methods
+- **Troubleshooting export functionality** - Identify which tags or pixels differ between export methods
 - **System validation** - Ensure DICOM exports maintain data integrity
 - **Migration testing** - Verify data consistency when moving between systems
 - **Quality assurance** - Compare original studies with processed/anonymized versions
+- **Image integrity validation** - Verify pixel data preservation across different export methods
 
 ## Features
 
+### 🏷️ **Tag Comparison**
 - ✅ **Multi-file comparison** - Compare one baseline against multiple comparison files
 - ✅ **Recursive ZIP extraction** - Handles nested folder structures in ZIP files
 - ✅ **Comprehensive tag analysis** - Compares all DICOM tags including sequences
 - ✅ **Rich terminal output** - Beautiful formatted results with statistics
-- ✅ **CSV reporting** - Detailed exportable reports for further analysis
+- ✅ **CSV/Excel reporting** - Detailed exportable reports with charts
 - ✅ **Instance matching** - Matches DICOM instances using SOPInstanceUID
 - ✅ **Difference categorization** - Identifies missing, extra, and modified tags
-- ✅ **Verbose debugging** - Detailed logs for troubleshooting
+
+### 🖼️ **Image Comparison**
+- ✅ **Pixel-level validation** - Compare actual image pixel data
+- ✅ **Tolerance support** - Allow minor differences (useful for lossy compression)
+- ✅ **DICOM normalization** - Apply rescale slope/intercept and windowing
+- ✅ **Similarity scoring** - Calculate percentage of matching pixels
+- ✅ **Statistical analysis** - RMSE, max/mean differences, and more
+- ✅ **Dimension validation** - Detect image size differences
+- ✅ **Missing pixel data detection** - Identify instances without image data
+
+### 📊 **Reporting & Analytics**
+- ✅ **Professional Excel reports** with charts and conditional formatting
+- ✅ **CSV exports** for further analysis
+- ✅ **Terminal dashboards** with color-coded results
+- ✅ **Quality grading** (A+ to D) for export assessment
+- ✅ **Statistical breakdowns** by difference type and impact level
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.12 or higher
-- `uv` package manager (recommended) or `pip`
+#### Nix
+
+Support for Nix flakes out of the box. You can add it to your flake like this:
+
+Add the input:
+```nix
+dicom-compare.url = "github:FullMetalEd/Dicom-Compare";
+```
+
+Then you add it as a package in the packages section of your modules in the nixosConfiguration:
+```nix
+modules = [
+            # List of the config files this profile needs.
+            ./configuration.nix
+            (
+              {nixpkgs, ...}:
+                {
+                  environment.systemPackages = [
+                    inputs.dicom-compare.packages."${systemSettings.system}".default
+                  ];
+                }
+            )
+          ];
+```
+
+#### Run as a python module from source
+
+**uv packages manager required.**
+
+Download the repo, and run ```uv sync``` this will download and setup the venv you need.
+you can then run commands like ```uv run dicom_compare/main.py --help```, this will print the command help information.
+
 
 ### Install Dependencies
 
 ```bash
 # Using uv (recommended)
-uv add typer[all] pydicom rich pandas openpyxl matplotlib
+uv add typer[all] pydicom rich pandas openpyxl matplotlib numpy
 
 # Or using pip
-pip install typer[all] pydicom rich pandas openpyxl matplotlib
+pip install typer[all] pydicom rich pandas openpyxl matplotlib numpy
 ```
 
-### Download the Tool
-
-```bash
-git clone <repository-url>
-cd dicomcompare
+### Or run without installing from Nix
+```nix
+nix run github:FullMetalEd/Dicom-Compare -- --help
 ```
 
 ## Quick Start
 
-### Basic Comparison
+### Tag Comparison
 ```bash
-# Compare two ZIP files
-uv run main.py compare -f original.zip -f export1.zip
+# Compare DICOM metadata tags
+dicom-compare compare -f original.zip -f export1.zip
 
-# Compare original against multiple exports
-uv run main.py compare -f original.zip -f method1.zip -f method2.zip -f method3.zip
+# Compare original against multiple exports with reporting
+dicom-compare compare -f original.zip -f method1.zip -f method2.zip -r analysis.xlsx
+
+# Verbose output for debugging
+dicom-compare compare -f original.zip -f export1.zip -v
 ```
 
-### With Reporting
+### Image Comparison
 ```bash
-# Generate CSV report
-uv run main.py compare -f original.zip -f export1.zip -r results.csv
+# Compare image pixel data (exact match)
+dicom-compare image -f original.zip -f export1.zip
 
-# Verbose output with debugging
-uv run main.py compare -f original.zip -f export1.zip -r results.csv -v
+# Allow small differences (useful for lossy compression)
+dicom-compare image -f original.zip -f export1.zip -t 1.0
+
+# Image comparison with Excel report
+dicom-compare image -f original.zip -f export1.zip -r image_analysis.xlsx
+
+# Disable DICOM normalization
+dicom-compare image -f original.zip -f export1.zip --no-normalize
 ```
 
-### Inspect ZIP Contents
+### Inspection
 ```bash
 # See what's inside ZIP files before comparing
-uv run main.py inspect -f original.zip -f export1.zip
+dicom-compare inspect -f study1.zip -f study2.zip
 ```
 
 ## Command Reference
 
-### `compare` - Main Comparison Command
+### `compare` - Tag Comparison
 
 ```bash
-uv run main.py compare [OPTIONS]
+dicom-compare compare [OPTIONS]
 ```
 
 **Options:**
 - `-f, --file PATH` - ZIP files to compare (minimum 2 required, first is baseline)
-- `-r, --report PATH` - Save detailed report to CSV file
+- `-r, --report PATH` - Save detailed report to CSV/Excel file
 - `-v, --verbose` - Enable verbose debugging output
 - `--help` - Show help message
 
-**Examples:**
+**What it compares:**
+- All DICOM metadata tags
+- Tag values, presence/absence
+- Instance matching by SOPInstanceUID
+- Study/Series organization
+
+### `image` - Image Pixel Data Comparison
+
 ```bash
-# Basic comparison
-uv run main.py compare -f baseline.zip -f comparison.zip
-
-# Multiple comparisons with report
-uv run main.py compare -f original.zip -f export1.zip -f export2.zip -r analysis.csv
-
-# Verbose debugging
-uv run main.py compare -f original.zip -f export1.zip -v
+dicom-compare image [OPTIONS]
 ```
+
+**Options:**
+- `-f, --file PATH` - ZIP files to compare (minimum 2 required, first is baseline)
+- `-r, --report PATH` - Save image comparison report to CSV/Excel file
+- `-t, --tolerance FLOAT` - Tolerance for pixel differences (default: 0.0 = exact match)
+- `--normalize/--no-normalize` - Apply DICOM normalization (default: enabled)
+- `-v, --verbose` - Enable verbose debugging output
+- `--help` - Show help message
+
+**What it compares:**
+- Actual pixel values in DICOM images
+- Image dimensions and data types
+- Statistical similarity measures
+- Pixel-level differences with tolerance
+
+**Tolerance Examples:**
+```bash
+# Exact pixel match only
+dicom-compare image -f original.zip -f export.zip -t 0.0
+
+# Allow differences up to 1 pixel value (good for minor compression)
+dicom-compare image -f original.zip -f export.zip -t 1.0
+
+# Allow larger differences (useful for lossy compression)
+dicom-compare image -f original.zip -f export.zip -t 5.0
+```
+
+**Normalization:**
+- **Enabled (default)**: Applies DICOM rescale slope/intercept and windowing
+- **Disabled**: Compares raw pixel values as stored in the file
 
 ### `inspect` - ZIP Content Inspector
 
 ```bash
-uv run main.py inspect [OPTIONS]
+dicom-compare inspect [OPTIONS]
 ```
 
 **Options:**
 - `-f, --file PATH` - ZIP files to inspect
 
-**Example:**
-```bash
-uv run main.py inspect -f study1.zip -f study2.zip
-```
-
 ## Understanding the Results
 
-### Terminal Output
+### Tag Comparison Output
 
-The tool displays results in three main sections:
-
-#### 1. Summary Panel
 ```
 ╭─ 📋 DICOM Comparison Summary ─╮
 │ Baseline: original.zip         │
@@ -126,101 +202,141 @@ The tool displays results in three main sections:
 │ Total Studies: 1               │
 │ Total Instances: 1,247         │
 ╰────────────────────────────────╯
+
+🔍 Detailed Comparison Results
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ File                           ┃ Perfect Matches ┃ Tag Differences ┃ Missing Instances ┃ Extra Instances ┃ Data    ┃
+┃                                ┃                 ┃                 ┃                   ┃                 ┃ Integrity┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ export1.zip                    │ 1,200 (96.2%)   │ 47 (3.8%)       │ 0 (0.0%)          │ 0 (0.0%)        │ 96.2%   │
+│ export2.zip                    │ 1,156 (92.7%)   │ 91 (7.3%)       │ 0 (0.0%)          │ 0 (0.0%)        │ 92.7%   │
+└────────────────────────────────┴─────────────────┴─────────────────┴───────────────────┴─────────────────┴─────────┘
 ```
 
-#### 2. Results Table
+### Image Comparison Output
+
 ```
-🔍 Comparison Results
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
-┃ File                           ┃ Perfect Matches ┃ Tag Differences ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
-│ export1.zip                    │ 1,200 (96.2%)   │ 45 (3.6%)       │
-│ export2.zip                    │ 1,156 (92.7%)   │ 89 (7.1%)       │
-└────────────────────────────────┴─────────────────┴─────────────────┘
+╭─ 🖼️ DICOM Image Comparison Summary ─╮
+│ Baseline: original.zip               │
+│ Comparison Mode: Image Pixel Data    │
+│ Tolerance: 1.0                       │
+│ Normalization: Applied               │
+│ Images Compared: 189                 │
+╰──────────────────────────────────────╯
+
+🖼️ Image Comparison Results
+┏━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┓
+┃ File                    ┃ Exact ┃ Pixel   ┃ Avg         ┃ Missing   ┃ Extra     ┃ Match   ┃
+┃                         ┃ Match ┃ Diffs   ┃ Similarity  ┃ Images    ┃ Images    ┃ %       ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━┩
+│ export1.zip             │ 150   │ 39      │ 95.2%       │ 0         │ 0         │ 79.4%   │
+└─────────────────────────┴───────┴─────────┴─────────────┴───────────┴───────────┴─────────┘
 ```
 
 **Column Meanings:**
+
+**Tag Comparison:**
 - **Perfect Matches** - Instances where all tags are identical
 - **Tag Differences** - Instances with one or more differing tags
 - **Missing Instances** - Instances in baseline but not in comparison
 - **Extra Instances** - Instances in comparison but not in baseline
-- **Match %** - Percentage of perfectly matching instances
+- **Data Integrity** - Overall quality score (0-100%)
 
-### CSV Report Structure
+**Image Comparison:**
+- **Exact Match** - Images with identical pixel values (within tolerance)
+- **Pixel Diffs** - Images with pixel value differences
+- **Avg Similarity** - Average percentage of matching pixels
+- **Missing Images** - Images in baseline but not in comparison
+- **Extra Images** - Images in comparison but not in baseline
+- **Match %** - Percentage of exactly matching images
 
-The CSV report contains detailed information about every difference found:
+### Report Formats
 
-```csv
-ReportType,BaselineFile,ComparisonFile,SOPInstanceUID,TagName,TagKeyword,BaselineValue,ComparisonValue,DifferenceType,VR
-```
+#### CSV Reports
+Simple tabular format with all differences, suitable for:
+- Filtering and sorting in spreadsheet applications
+- Further analysis with data science tools
+- Integration with other systems
 
-#### Report Types
+#### Excel Reports
+Professional multi-sheet reports with:
+- **Executive Summary** - Key metrics and charts
+- **Detailed Results** - Every comparison result
+- **Tag/Image Analysis** - Breakdown by difference type
+- **Statistics** - Comprehensive statistical analysis
+- **Settings & Info** - Configuration and explanations
 
-| ReportType | Description |
-|------------|-------------|
-| `SUMMARY` | High-level statistics and counts |
-| `TAG_DIFFERENCE` | Individual tag differences between matched instances |
-| `MISSING_INSTANCE` | Instances present in baseline but missing in comparison |
-| `EXTRA_INSTANCE` | Instances present in comparison but missing in baseline |
-
-#### Difference Types
-
-| DifferenceType | Meaning | Example |
-|----------------|---------|---------|
-| `MISSING_TAG` | Tag exists in baseline but not in comparison | Baseline: "ISO_IR 100", Comparison: "NULL" |
-| `EXTRA_TAG` | Tag exists in comparison but not in baseline | Baseline: "NULL", Comparison: "FOR PRESENTATION" |
-| `VALUE_DIFF` | Tag exists in both but with different values | Baseline: "John Doe", Comparison: "J. Doe" |
-| `TYPE_DIFF` | Tag exists in both but with different data types | Baseline: "123", Comparison: 123 |
-
-## Real-World Scenarios
+## Real-World Use Cases
 
 ### Scenario 1: Export Method Validation
 
 **Problem:** Testing two different export methods from the same PACS system.
 
 ```bash
-uv run main.py compare -f original_export.zip -f new_export_method.zip -r validation.csv
+# Tag comparison to check metadata preservation
+dicom-compare compare -f original_export.zip -f new_export_method.zip -r validation.xlsx
+
+# Image comparison to verify pixel data integrity
+dicom-compare image -f original_export.zip -f new_export_method.zip -r pixel_validation.xlsx
 ```
 
 **Expected Results:**
-- High percentage of perfect matches (>95%)
-- Minor differences in system-generated tags
-- No missing instances
+- Tag comparison: High percentage of perfect matches (>95%)
+- Image comparison: Exact pixel matches or very high similarity (>99%)
 
-### Scenario 2: Anonymization Validation
+### Scenario 2: Lossy Compression Analysis
 
-**Problem:** Verifying that anonymization properly removes/modifies patient data.
+**Problem:** Evaluating the impact of JPEG compression on DICOM images.
 
 ```bash
-uv run main.py compare -f original.zip -f anonymized.zip -r anonymization_check.csv
+# Compare with tolerance for compression artifacts
+dicom-compare image -f uncompressed.zip -f jpeg_compressed.zip -t 2.0 -r compression_analysis.xlsx
 ```
 
 **Expected Results:**
-- `VALUE_DIFF` for patient-related tags (PatientName, PatientID)
-- `MISSING_TAG` for tags that should be removed
-- Clinical data should remain unchanged
+- Some pixel differences due to compression
+- Similarity scores depend on compression level
+- Statistical analysis shows compression impact
 
-### Scenario 3: System Migration Testing
+### Scenario 3: Anonymization Validation
+
+**Problem:** Verifying that anonymization properly removes/modifies patient data while preserving clinical data.
+
+```bash
+# Tag comparison to check anonymization
+dicom-compare compare -f original.zip -f anonymized.zip -r anonymization_check.xlsx
+
+# Image comparison to ensure pixel data is unchanged
+dicom-compare image -f original.zip -f anonymized.zip -r image_integrity_check.xlsx
+```
+
+**Expected Results:**
+- Tag comparison: Differences in patient-related tags, clinical data unchanged
+- Image comparison: Perfect pixel matches (anonymization shouldn't affect images)
+
+### Scenario 4: System Migration Testing
 
 **Problem:** Ensuring data integrity when migrating between DICOM systems.
 
 ```bash
-uv run main.py compare -f source_system.zip -f target_system.zip -r migration_validation.csv
+# Comprehensive validation
+dicom-compare compare -f source_system.zip -f target_system.zip -r migration_tags.xlsx
+dicom-compare image -f source_system.zip -f target_system.zip -r migration_images.xlsx
 ```
 
 **Expected Results:**
 - Most instances should match perfectly
-- Differences in system-specific tags are acceptable
-- Critical clinical tags must be identical
+- Acceptable differences in system-specific tags
+- Critical clinical tags and pixel data must be identical
 
 ## Troubleshooting
 
 ### Common Issues
 
-#### 1. "No DICOM files found"
+#### "No DICOM files found"
 ```bash
 # Use inspect to see ZIP contents
-uv run main.py inspect -f yourfile.zip
+dicom-compare inspect -f yourfile.zip
 
 # Common causes:
 # - ZIP contains folders but no actual DICOM files
@@ -228,10 +344,10 @@ uv run main.py inspect -f yourfile.zip
 # - Files are compressed or encrypted
 ```
 
-#### 2. "Only 1 instance loaded from large ZIP"
+#### "Only a few instances compared from large ZIP"
 ```bash
 # Enable verbose mode to see extraction details
-uv run main.py compare -f file1.zip -f file2.zip -v
+dicom-compare compare -f file1.zip -f file2.zip -v
 
 # Common causes:
 # - DICOM files are in nested folders not being discovered
@@ -239,63 +355,96 @@ uv run main.py compare -f file1.zip -f file2.zip -v
 # - Permission issues during extraction
 ```
 
-#### 3. "No differences found but expected some"
-```bash
-# Check if comparison level is too lenient
-# Certain tags might be in the ignored list
+#### "High pixel differences but tags match"
+This often indicates:
+- **Lossy compression** applied to one set
+- **Different bit depths** (16-bit vs 8-bit)
+- **Normalization differences** - try `--no-normalize`
+- **Different transfer syntaxes**
 
-# Common ignored tags:
-# - InstanceCreationDate/Time
-# - StationName
-# - InstitutionName
-# - SoftwareVersions
-```
-
-#### 4. "CSV report is empty"
-The CSV only contains differences. If files are identical, you'll see:
-```csv
-ReportType,BaselineFile,ComparisonFile,SOPInstanceUID,TagName,TagKeyword,BaselineValue,ComparisonValue,DifferenceType,VR
-INFO,INFO,INFO,INFO,NO_DIFFERENCES_FOUND,NO_DIFFERENCES_FOUND,All instances match perfectly,All instances match perfectly,INFO,INFO
-```
+#### "Low similarity scores"
+- Check if normalization should be disabled: `--no-normalize`
+- Increase tolerance for minor differences: `-t 1.0` or higher
+- Verify you're comparing the same study data
 
 ### Performance Tips
 
 - **Large studies**: Use verbose mode (`-v`) to monitor progress
 - **Multiple comparisons**: Process one comparison at a time for large datasets
-- **Memory usage**: Tool loads all instances into memory - monitor RAM usage for very large studies
-
-## Interpreting Results for Different Use Cases
-
-### Quality Assurance
-- **Look for**: Unexpected `VALUE_DIFF` in critical clinical tags
-- **Accept**: Differences in timestamps, system identifiers
-- **Red flags**: Missing instances, changes in pixel data
-
-### System Validation
-- **Look for**: High match percentages (>98%)
-- **Accept**: Differences in implementation-specific tags
-- **Red flags**: Systematic missing tags across all instances
-
-### Export Troubleshooting
-- **Look for**: Patterns in missing tags
-- **Accept**: Some tags may be intentionally excluded
-- **Red flags**: Missing required DICOM tags
+- **Memory usage**: Image comparison loads pixel data into memory - monitor RAM usage
+- **Image comparison**: Much slower than tag comparison due to pixel processing
 
 ## File Format Support
 
 - **Input**: ZIP files containing DICOM studies
 - **DICOM Detection**: Automatic detection of DICOM files regardless of extension
 - **Nested Folders**: Full support for complex directory structures
-- **Output**: CSV reports (Excel support coming soon)
+- **Output**: CSV reports (basic) and Excel reports (advanced with charts)
 
-## Contributing
+## Development & Contributing
 
-Issues and feature requests are welcome! Common enhancement areas:
-- Excel reporting with charts
-- Custom tag filtering
-- Performance optimizations for large datasets
-- Additional matching algorithms
+### Project Structure
+```
+dicom_compare/
+├── __init__.py
+├── main.py              # CLI entry point with multiple commands
+├── models.py            # Tag comparison data structures
+├── image_models.py      # Image comparison data structures
+├── dicom_extractor.py   # ZIP extraction logic
+├── dicom_loader.py      # DICOM file discovery and loading
+├── dicom_comparator.py  # Tag comparison logic
+├── image_comparator.py  # Image comparison logic
+├── image_command.py     # Image comparison command implementation
+└── utils.py             # Helper functions
+```
+
+### Running from Source
+```bash
+# Clone repository
+git clone https://github.com/FullMetalEd/Dicom-Compare.git
+cd Dicom-Compare
+
+# Install dependencies
+uv sync
+
+# Run directly
+uv run dicom_compare/main.py --help
+```
+
+### Building with Nix
+```bash
+# Build package
+nix build .#dicom-compare
+
+# Run from source
+nix run . -- --help
+
+# Development shell
+nix develop
+```
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Changelog
+
+### v0.2.0 (Latest)
+- ✅ **Added image pixel data comparison** - New `image` command
+- ✅ **Multi-command CLI structure** - `compare`, `image`, `inspect`
+- ✅ **Tolerance support** for image comparison
+- ✅ **DICOM normalization** options
+- ✅ **Enhanced Excel reports** with charts and conditional formatting
+- ✅ **Statistical analysis** for image similarities
+- ✅ **Improved error handling** and progress reporting
+
+### v0.1.0
+- ✅ **Basic tag comparison** functionality
+- ✅ **ZIP extraction and DICOM discovery**
+- ✅ **CSV reporting**
+- ✅ **Terminal output with Rich formatting**
+- ✅ **Multi-file comparison support**
 
 ---
 
-For more information or support, please check the documentation or open an issue in the repository.
+For more information, bug reports, or feature requests, please visit the [GitHub repository](https://github.com/FullMetalEd/Dicom-Compare).
