@@ -58,15 +58,13 @@ class DicomExtractor:
             
             if self.verbose:
                 self._debug_directory_structure(extract_to)
-            
-            # Find DICOM files and create stats
-            dicom_files = self.find_dicom_files(extract_to, zip_path.name)
-            
+
+            # Create basic stats (DICOM count will be filled later)
             stats = ExtractionStats(
                 total_files=len(files),
                 total_folders=len(directories),
-                dicom_files=len(dicom_files),
-                non_dicom_files=len(files) - len(dicom_files)
+                dicom_files=0,  # Will be filled by caller
+                non_dicom_files=len(files)  # Will be updated by caller
             )
             
             return extract_to, stats

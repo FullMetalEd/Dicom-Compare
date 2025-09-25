@@ -90,7 +90,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.7.0" },
-    { name = "numpy", specifier = ">=2.3.1" },
+    { name = "numpy", specifier = ">=2.3.0" },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pydicom", specifier = ">=2.4.0" },

@@ -3,10 +3,14 @@ from collections import defaultdict
 from rich.console import Console
 
 from dicom_compare.models import (
-    DicomInstance, TagDifference, InstanceComparison, 
+    DicomInstance, TagDifference, InstanceComparison,
     FileComparisonResult, DifferenceType, ComparisonSummary
 )
 from dicom_compare.dicom_loader import DicomStudy
+from dicom_compare.pixel_matching import (
+    create_pixel_hash, create_pixel_fingerprint, fingerprints_match,
+    create_fingerprint_key, PixelMatchingError
+)
 
 console = Console()
 
@@ -26,27 +30,29 @@ class DicomComparator:
         }
     
     def compare_studies(
-        self, 
+        self,
         baseline_studies: Dict[str, DicomStudy],
         comparison_studies: Dict[str, DicomStudy],
         baseline_file: str,
-        comparison_file: str
+        comparison_file: str,
+        matching_mode: str = "uid"
     ) -> FileComparisonResult:
         """
         Compare two sets of DICOM studies
-        
+
         Args:
             baseline_studies: Baseline studies (reference)
             comparison_studies: Studies to compare against baseline
             baseline_file: Name of baseline file
             comparison_file: Name of comparison file
-            
+            matching_mode: Matching strategy ('uid', 'hash', 'fingerprint')
+
         Returns:
             FileComparisonResult containing all comparison data
         """
         # Build instance lookup for both studies
-        baseline_instances = self._build_instance_lookup(baseline_studies)
-        comparison_instances = self._build_instance_lookup(comparison_studies)
+        baseline_instances = self._build_instance_lookup(baseline_studies, matching_mode)
+        comparison_instances = self._build_instance_lookup(comparison_studies, matching_mode)
         
         # Find matched, missing, and extra instances  
         matched_instances = []
@@ -57,26 +63,66 @@ class DicomComparator:
         comparison_sop_uids = set(comparison_instances.keys())
         
         # Find matches and compare
-        common_sop_uids = baseline_sop_uids.intersection(comparison_sop_uids)
-        for sop_uid in common_sop_uids:
-            baseline_instance = baseline_instances[sop_uid]
-            comparison_instance = comparison_instances[sop_uid]
-            
-            instance_comparison = self._compare_instances(
-                baseline_instance, comparison_instance, 
+        if matching_mode == "fingerprint":
+            # Special handling for fingerprint matching
+            matched_instances = self._match_by_fingerprint(
+                baseline_instances, comparison_instances,
                 baseline_file, comparison_file
             )
-            matched_instances.append(instance_comparison)
-        
-        # Find missing instances (in baseline but not in comparison)
-        missing_sop_uids = baseline_sop_uids - comparison_sop_uids
-        for sop_uid in missing_sop_uids:
-            missing_instances.append(baseline_instances[sop_uid])
-        
-        # Find extra instances (in comparison but not in baseline)
-        extra_sop_uids = comparison_sop_uids - baseline_sop_uids
-        for sop_uid in extra_sop_uids:
-            extra_instances.append(comparison_instances[sop_uid])
+            # For fingerprint mode, remaining logic needs different approach
+            baseline_matched = {comp.sop_instance_uid for comp in matched_instances}
+            comparison_matched = set()
+            for comp in matched_instances:
+                # Find corresponding comparison instance
+                for key, instance in comparison_instances.items():
+                    if hasattr(instance, '_pixel_fingerprint'):
+                        baseline_instances_list = [inst for inst in baseline_instances.values()
+                                                 if inst.sop_instance_uid == comp.sop_instance_uid]
+                        if baseline_instances_list:
+                            baseline_inst = baseline_instances_list[0]
+                            if (hasattr(baseline_inst, '_pixel_fingerprint') and
+                                fingerprints_match(baseline_inst._pixel_fingerprint, instance._pixel_fingerprint)):
+                                comparison_matched.add(instance.sop_instance_uid)
+                                break
+
+            # Missing/extra for fingerprint mode
+            all_baseline = {inst.sop_instance_uid: inst for inst in baseline_instances.values()}
+            all_comparison = {inst.sop_instance_uid: inst for inst in comparison_instances.values()}
+
+            missing_sop_uids = set(all_baseline.keys()) - baseline_matched
+            extra_sop_uids = set(all_comparison.keys()) - comparison_matched
+
+        else:
+            # Standard UID/hash matching
+            common_keys = baseline_sop_uids.intersection(comparison_sop_uids)
+            for key in common_keys:
+                baseline_instance = baseline_instances[key]
+                comparison_instance = comparison_instances[key]
+
+                instance_comparison = self._compare_instances(
+                    baseline_instance, comparison_instance,
+                    baseline_file, comparison_file
+                )
+                matched_instances.append(instance_comparison)
+
+            # Find missing instances (in baseline but not in comparison)
+            missing_sop_uids = baseline_sop_uids - comparison_sop_uids
+            # Find extra instances (in comparison but not in baseline)
+            extra_sop_uids = comparison_sop_uids - baseline_sop_uids
+
+        # Handle missing and extra instances based on matching mode
+        if matching_mode == "fingerprint":
+            # For fingerprint mode, use the SOPInstanceUID-based sets calculated above
+            for sop_uid in missing_sop_uids:
+                missing_instances.append(all_baseline[sop_uid])
+            for sop_uid in extra_sop_uids:
+                extra_instances.append(all_comparison[sop_uid])
+        else:
+            # For UID/hash mode, use key-based matching
+            for key in missing_sop_uids:
+                missing_instances.append(baseline_instances[key])
+            for key in extra_sop_uids:
+                extra_instances.append(comparison_instances[key])
         
         return FileComparisonResult(
             baseline_file=baseline_file,
@@ -88,13 +134,37 @@ class DicomComparator:
             total_instances_comparison=len(comparison_instances)
         )
     
-    def _build_instance_lookup(self, studies: Dict[str, DicomStudy]) -> Dict[str, DicomInstance]:
-        """Build flat lookup of instances by SOPInstanceUID"""
+    def _build_instance_lookup(self, studies: Dict[str, DicomStudy], matching_mode: str = "uid") -> Dict[str, DicomInstance]:
+        """Build flat lookup of instances by appropriate matching key"""
         instances = {}
+        failed_instances = []
+
         for study in studies.values():
             for series in study.series.values():
                 for instance in series.instances.values():
-                    instances[instance.sop_instance_uid] = instance
+                    try:
+                        if matching_mode == "uid":
+                            key = instance.sop_instance_uid
+                        elif matching_mode == "hash":
+                            key = create_pixel_hash(instance)
+                        elif matching_mode == "fingerprint":
+                            fingerprint = create_pixel_fingerprint(instance)
+                            key = create_fingerprint_key(fingerprint)
+                            # Store fingerprint for later comparison
+                            instance._pixel_fingerprint = fingerprint
+                        else:
+                            raise ValueError(f"Unknown matching mode: {matching_mode}")
+
+                        instances[key] = instance
+
+                    except PixelMatchingError as e:
+                        failed_instances.append((instance.sop_instance_uid, str(e)))
+                        console.print(f"   ❌ Failed to process {instance.file_path.name}: {e}", style="red")
+                        continue
+
+        if failed_instances and matching_mode != "uid":
+            console.print(f"   ⚠️  {len(failed_instances)} instances failed pixel processing and were skipped", style="yellow")
+
         return instances
     
     def _compare_instances(
@@ -194,3 +264,64 @@ class DicomComparator:
                 console.print(f"   ... and {len(instance.tags) - max_tags} more tags", style="dim")
                 break
             console.print(f"   {tag}: {str(value)[:100]}{'...' if len(str(value)) > 100 else ''}", style="dim")
+
+    def _match_by_fingerprint(
+        self,
+        baseline_instances: Dict[str, DicomInstance],
+        comparison_instances: Dict[str, DicomInstance],
+        baseline_file: str,
+        comparison_file: str
+    ) -> List[InstanceComparison]:
+        """
+        Match instances using pixel fingerprints for similarity-based comparison
+
+        Args:
+            baseline_instances: Dictionary of baseline instances (key = fingerprint key)
+            comparison_instances: Dictionary of comparison instances (key = fingerprint key)
+            baseline_file: Name of baseline file
+            comparison_file: Name of comparison file
+
+        Returns:
+            List of matched InstanceComparison objects
+        """
+        matched_instances = []
+        used_comparison_keys = set()
+
+        # For each baseline instance, find the best matching comparison instance
+        for baseline_key, baseline_instance in baseline_instances.items():
+            if not hasattr(baseline_instance, '_pixel_fingerprint'):
+                continue
+
+            best_match = None
+            best_comparison_key = None
+
+            # Look for exact fingerprint key match first
+            if baseline_key in comparison_instances and baseline_key not in used_comparison_keys:
+                comparison_instance = comparison_instances[baseline_key]
+                if hasattr(comparison_instance, '_pixel_fingerprint'):
+                    if fingerprints_match(baseline_instance._pixel_fingerprint,
+                                        comparison_instance._pixel_fingerprint):
+                        best_match = comparison_instance
+                        best_comparison_key = baseline_key
+
+            # If no exact match, search all comparison instances
+            if best_match is None:
+                for comp_key, comparison_instance in comparison_instances.items():
+                    if (comp_key not in used_comparison_keys and
+                        hasattr(comparison_instance, '_pixel_fingerprint')):
+                        if fingerprints_match(baseline_instance._pixel_fingerprint,
+                                            comparison_instance._pixel_fingerprint):
+                            best_match = comparison_instance
+                            best_comparison_key = comp_key
+                            break
+
+            # If we found a match, create comparison
+            if best_match is not None:
+                instance_comparison = self._compare_instances(
+                    baseline_instance, best_match,
+                    baseline_file, comparison_file
+                )
+                matched_instances.append(instance_comparison)
+                used_comparison_keys.add(best_comparison_key)
+
+        return matched_instances

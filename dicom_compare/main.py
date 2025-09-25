@@ -103,8 +103,8 @@ def inspect(
             temp_dirs.append(temp_dir)
             
             # Extract
-            extracted_path = extractor.extract_zip(file, temp_dir)
-            
+            extracted_path, stats = extractor.extract_zip(file, temp_dir)
+
             # Find DICOMs
             dicom_files = extractor.find_dicom_files(extracted_path)
             
@@ -151,9 +151,9 @@ def inspect(
 @app.command()
 def compare(
     files: List[Path] = typer.Option(
-        ..., 
-        "-f", 
-        "--file", 
+        ...,
+        "-f",
+        "--file",
         help="ZIP files to compare (first file is baseline, minimum 2 files required)"
     ),
     report: Optional[Path] = typer.Option(
@@ -161,6 +161,11 @@ def compare(
         "-r",
         "--report",
         help="Path to save CSV/Excel report (format determined by extension)"
+    ),
+    matching_mode: str = typer.Option(
+        "uid",
+        "--matching-mode",
+        help="Matching strategy: 'uid' (default), 'hash' (pixel hash), 'fingerprint' (statistical)"
     ),
     verbose: bool = typer.Option(
         False,
@@ -181,6 +186,12 @@ def compare(
         validate_inputs(files)
         if report:
             validate_report_path(report)
+
+        # Validate matching mode
+        valid_modes = ["uid", "hash", "fingerprint"]
+        if matching_mode not in valid_modes:
+            raise ValueError(f"Invalid matching mode '{matching_mode}'. Must be one of: {', '.join(valid_modes)}")
+
     except Exception as e:
         console.print(f"❌ {str(e)}", style="red")
         raise typer.Exit(1)
@@ -228,16 +239,17 @@ def compare(
     
         
         # Compare studies
-        console.print("🔍 Comparing DICOM studies...", style="yellow")
+        console.print(f"🔍 Comparing DICOM studies (matching mode: {matching_mode})...", style="yellow")
         comparator = DicomComparator()
-        
+
         baseline_name, baseline_studies = loaded_studies[0]
         comparison_results = []
-        
+
         for comp_name, comp_studies in loaded_studies[1:]:
             result = comparator.compare_studies(
-                baseline_studies, comp_studies, 
-                baseline_name, comp_name
+                baseline_studies, comp_studies,
+                baseline_name, comp_name,
+                matching_mode=matching_mode
             )
             comparison_results.append(result)
         
