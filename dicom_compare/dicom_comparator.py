@@ -11,6 +11,9 @@ from dicom_compare.pixel_matching import (
     create_pixel_hash, create_pixel_fingerprint, fingerprints_match,
     create_fingerprint_key, PixelMatchingError
 )
+from dicom_compare.metadata_matching import (
+    try_metadata_matching, MatchResult
+)
 
 console = Console()
 
@@ -63,7 +66,35 @@ class DicomComparator:
         comparison_sop_uids = set(comparison_instances.keys())
         
         # Find matches and compare
-        if matching_mode == "fingerprint":
+        if matching_mode == "smart":
+            # Smart matching with cascading strategies
+            matched_instances = self._match_with_smart_strategy(
+                baseline_instances, comparison_instances,
+                baseline_file, comparison_file
+            )
+            # Calculate missing/extra for smart matching
+            # We need to track which actual instances were matched
+            baseline_matched_uids = set()
+            comparison_matched_uids = set()
+
+            for matched_comparison in matched_instances:
+                baseline_matched_uids.add(matched_comparison.sop_instance_uid)
+                # Find the corresponding comparison instance UID
+                # This requires us to store it during matching - for now use a simple approach
+                for comp_uid, comp_instance in comparison_instances.items():
+                    if hasattr(matched_comparison, '_comparison_uid'):
+                        if matched_comparison._comparison_uid == comp_uid:
+                            comparison_matched_uids.add(comp_uid)
+                            break
+
+            # For smart mode, we use actual instance dictionaries
+            all_baseline = {inst.sop_instance_uid: inst for inst in baseline_instances.values()}
+            all_comparison = {inst.sop_instance_uid: inst for inst in comparison_instances.values()}
+
+            missing_sop_uids = set(all_baseline.keys()) - baseline_matched_uids
+            extra_sop_uids = set(all_comparison.keys()) - comparison_matched_uids
+
+        elif matching_mode == "fingerprint":
             # Special handling for fingerprint matching
             matched_instances = self._match_by_fingerprint(
                 baseline_instances, comparison_instances,
@@ -152,6 +183,11 @@ class DicomComparator:
                             key = create_fingerprint_key(fingerprint)
                             # Store fingerprint for later comparison
                             instance._pixel_fingerprint = fingerprint
+                        elif matching_mode == "smart":
+                            # Smart matching will be handled differently - use UID as temporary key
+                            key = instance.sop_instance_uid
+                            # Store instance for smart matching
+                            instance._smart_matching_ready = True
                         else:
                             raise ValueError(f"Unknown matching mode: {matching_mode}")
 
@@ -323,5 +359,152 @@ class DicomComparator:
                 )
                 matched_instances.append(instance_comparison)
                 used_comparison_keys.add(best_comparison_key)
+
+        return matched_instances
+
+    def _match_with_smart_strategy(
+        self,
+        baseline_instances: Dict[str, DicomInstance],
+        comparison_instances: Dict[str, DicomInstance],
+        baseline_file: str,
+        comparison_file: str
+    ) -> List[InstanceComparison]:
+        """
+        Smart matching using cascading strategies
+
+        Args:
+            baseline_instances: Dictionary of baseline instances
+            comparison_instances: Dictionary of comparison instances
+            baseline_file: Name of baseline file
+            comparison_file: Name of comparison file
+
+        Returns:
+            List of matched InstanceComparison objects with confidence scores
+        """
+        matched_instances = []
+        used_comparison_uids = set()
+
+        console.print("   🧠 Using smart matching with cascading strategies...", style="cyan")
+
+        # Define matching strategies in order of preference
+        strategies = [
+            ('pixel_hash', 'Pixel data hash (exact match)'),
+            ('pixel_fingerprint', 'Pixel statistical fingerprint'),
+            ('spatial', 'Spatial position and orientation'),
+            ('acquisition', 'Series/instance numbers and timing'),
+            ('position', '3D spatial coordinates'),
+            ('sequence', 'MR sequence parameters'),
+            ('dimensional', 'Image dimensions and characteristics')
+        ]
+
+        strategy_stats = {strategy: {'attempted': 0, 'successful': 0} for strategy, _ in strategies}
+
+        # Pre-build lookup tables for each strategy to improve efficiency
+        strategy_lookups = {}
+
+        for strategy, description in strategies:
+            if strategy not in ['pixel_hash', 'pixel_fingerprint']:
+                # Build lookup tables for comparison instances
+                comparison_lookup = {}
+                for comp_uid, comp_instance in comparison_instances.items():
+                    result = try_metadata_matching(comp_instance, strategy)
+                    if result.success:
+                        if result.match_key not in comparison_lookup:
+                            comparison_lookup[result.match_key] = []
+                        comparison_lookup[result.match_key].append((comp_uid, comp_instance, result.confidence))
+                strategy_lookups[strategy] = comparison_lookup
+
+        for baseline_uid, baseline_instance in baseline_instances.items():
+            best_match = None
+            best_comparison_uid = None
+            best_strategy = None
+            best_confidence = 0.0
+
+            # Try each strategy in order
+            for strategy, description in strategies:
+                strategy_stats[strategy]['attempted'] += 1
+
+                try:
+                    # Try pixel-based strategies first
+                    if strategy == 'pixel_hash':
+                        try:
+                            baseline_hash = create_pixel_hash(baseline_instance)
+                            for comp_uid, comp_instance in comparison_instances.items():
+                                if comp_uid not in used_comparison_uids:
+                                    comp_hash = create_pixel_hash(comp_instance)
+                                    if baseline_hash == comp_hash:
+                                        best_match = comp_instance
+                                        best_comparison_uid = comp_uid
+                                        best_strategy = strategy
+                                        best_confidence = 1.0
+                                        break
+                        except PixelMatchingError:
+                            continue
+
+                    elif strategy == 'pixel_fingerprint':
+                        try:
+                            baseline_fp = create_pixel_fingerprint(baseline_instance)
+                            for comp_uid, comp_instance in comparison_instances.items():
+                                if comp_uid not in used_comparison_uids:
+                                    comp_fp = create_pixel_fingerprint(comp_instance)
+                                    if fingerprints_match(baseline_fp, comp_fp):
+                                        best_match = comp_instance
+                                        best_comparison_uid = comp_uid
+                                        best_strategy = strategy
+                                        best_confidence = 0.95
+                                        break
+                        except PixelMatchingError:
+                            continue
+
+                    else:
+                        # Try metadata-based strategies using pre-built lookup
+                        baseline_result = try_metadata_matching(baseline_instance, strategy)
+                        if not baseline_result.success:
+                            continue
+
+                        # Look up matches in pre-built table
+                        if strategy in strategy_lookups and baseline_result.match_key in strategy_lookups[strategy]:
+                            candidates = strategy_lookups[strategy][baseline_result.match_key]
+                            for comp_uid, comp_instance, confidence in candidates:
+                                if comp_uid not in used_comparison_uids:
+                                    # Found a match with this strategy
+                                    if confidence > best_confidence:
+                                        best_match = comp_instance
+                                        best_comparison_uid = comp_uid
+                                        best_strategy = strategy
+                                        best_confidence = confidence
+                                    break
+
+                    # If we found a high-confidence match, stop trying other strategies
+                    if best_confidence >= 0.95:
+                        break
+
+                except Exception as e:
+                    console.print(f"   ⚠️  Error in {strategy} matching: {e}", style="yellow")
+                    continue
+
+            # If we found a match, create the comparison
+            if best_match is not None and best_comparison_uid is not None:
+                strategy_stats[best_strategy]['successful'] += 1
+                used_comparison_uids.add(best_comparison_uid)
+
+                instance_comparison = self._compare_instances(
+                    baseline_instance, best_match,
+                    baseline_file, comparison_file
+                )
+                # Store matching metadata for reporting
+                instance_comparison._matching_strategy = best_strategy
+                instance_comparison._matching_confidence = best_confidence
+                instance_comparison._comparison_uid = best_comparison_uid
+
+                matched_instances.append(instance_comparison)
+
+        # Report matching statistics
+        console.print("   📊 Smart matching results:", style="green")
+        for strategy, description in strategies:
+            stats = strategy_stats[strategy]
+            if stats['attempted'] > 0:
+                success_rate = (stats['successful'] / stats['attempted']) * 100
+                console.print(f"      {description}: {stats['successful']}/{stats['attempted']} ({success_rate:.1f}%)", style="dim")
 
         return matched_instances

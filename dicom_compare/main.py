@@ -6,6 +6,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import print as rprint
 from collections import defaultdict, Counter
+import pydicom
 
 # Excel availability check
 try:
@@ -165,7 +166,7 @@ def compare(
     matching_mode: str = typer.Option(
         "uid",
         "--matching-mode",
-        help="Matching strategy: 'uid' (default), 'hash' (pixel hash), 'fingerprint' (statistical)"
+        help="Matching strategy: 'uid' (default), 'hash' (pixel hash), 'fingerprint' (statistical), 'smart' (cascading fallback)"
     ),
     verbose: bool = typer.Option(
         False,
@@ -188,7 +189,7 @@ def compare(
             validate_report_path(report)
 
         # Validate matching mode
-        valid_modes = ["uid", "hash", "fingerprint"]
+        valid_modes = ["uid", "hash", "fingerprint", "smart"]
         if matching_mode not in valid_modes:
             raise ValueError(f"Invalid matching mode '{matching_mode}'. Must be one of: {', '.join(valid_modes)}")
 
