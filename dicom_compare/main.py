@@ -29,6 +29,8 @@ from dicom_compare.dicom_comparator import DicomComparator
 from dicom_compare.models import ComparisonSummary, FileComparisonResult
 from dicom_compare.utils import validate_inputs, create_temp_dir, cleanup_temp_dirs
 from dicom_compare.image_command import run_image_comparison
+from dicom_compare.hierarchical_loader import HierarchicalDicomLoader
+from dicom_compare.tag_search import TagSearchEngine, InteractiveSearchSession
 
 app = typer.Typer(
     name="dicomcompare",
@@ -79,53 +81,60 @@ def compare_images(
     """
     run_image_comparison(files, report, tolerance, normalize, verbose)
 
-@app.command()
-def inspect(
+# Create inspect command group
+inspect_app = typer.Typer(
+    name="inspect",
+    help="Inspect DICOM content at different hierarchy levels"
+)
+app.add_typer(inspect_app, name="inspect")
+
+@inspect_app.command("files")
+def inspect_files(
     files: List[Path] = typer.Option(
-        ..., 
-        "-f", 
-        "--file", 
+        ...,
+        "-f",
+        "--file",
         help="ZIP files to inspect"
     )
 ):
     """
-    Inspect ZIP files to see what DICOM content they contain.
+    Inspect ZIP file structure and basic DICOM content (original functionality).
     """
     console.print("🔍 Inspecting ZIP files...", style="blue")
-    
+
     temp_dirs = []
     try:
         extractor = DicomExtractor()
-        
+
         for file in files:
             console.print(f"\n📦 Inspecting {file.name}:", style="bold cyan")
-            
+
             temp_dir = create_temp_dir()
             temp_dirs.append(temp_dir)
-            
+
             # Extract
             extracted_path, stats = extractor.extract_zip(file, temp_dir)
 
             # Find DICOMs
             dicom_files = extractor.find_dicom_files(extracted_path)
-            
+
             if dicom_files:
                 console.print(f"\n✅ Found {len(dicom_files)} DICOM files", style="green")
-                
+
                 # Group by directory
                 by_directory = defaultdict(list)
                 for dicom_file in dicom_files:
                     relative_path = dicom_file.relative_to(extracted_path)
                     directory = str(relative_path.parent)
                     by_directory[directory].append(relative_path.name)
-                
+
                 for directory, files in by_directory.items():
                     console.print(f"   📁 {directory}: {len(files)} DICOM files", style="cyan")
                     for dicom_file in files[:3]:  # Show first 3 files per directory
                         console.print(f"      {dicom_file}", style="dim")
                     if len(files) > 3:
                         console.print(f"      ... and {len(files) - 3} more files", style="dim")
-                
+
                 # Load first few to check SOPInstanceUIDs
                 console.print(f"\n🔍 Checking DICOM content:", style="cyan")
                 for i, dicom_file in enumerate(dicom_files[:5]):  # Check first 5
@@ -140,14 +149,376 @@ def inspect(
                         console.print(f"      SeriesInstanceUID = {series_uid}", style="dim")
                     except Exception as e:
                         console.print(f"   ❌ {dicom_file.name}: Error reading - {e}", style="red")
-                
+
                 if len(dicom_files) > 5:
                     console.print(f"   ... and {len(dicom_files) - 5} more DICOM files", style="dim")
             else:
                 console.print("❌ No DICOM files found", style="red")
-    
+
     finally:
         cleanup_temp_dirs(temp_dirs)
+
+@inspect_app.command("search")
+def inspect_search(
+    files: List[Path] = typer.Option(
+        ...,
+        "-f",
+        "--file",
+        help="ZIP files to search"
+    ),
+    interactive: bool = typer.Option(
+        True,
+        "--interactive/--no-interactive",
+        help="Start interactive search session"
+    ),
+    max_results: int = typer.Option(
+        20,
+        "--max-results",
+        help="Maximum number of search results"
+    ),
+    query: Optional[str] = typer.Option(
+        None,
+        "-q",
+        "--query",
+        help="Search query (if not provided, starts interactive mode)"
+    )
+):
+    """
+    Interactive fuzzy search across all DICOM tags.
+    """
+    console.print("🔍 Loading DICOM files for search...", style="blue")
+
+    try:
+        # Load hierarchical data
+        loader = HierarchicalDicomLoader(verbose=False)  # Search is always quiet by default
+        data = loader.load_hierarchical_data(files)
+
+        # Create search engine
+        search_engine = TagSearchEngine(data)
+
+        # Show loading results
+        stats = data.get_stats()
+        console.print(f"📊 Loaded: {stats['patients']} patients, {stats['studies']} studies, "
+                     f"{stats['series']} series, {stats['instances']} instances", style="green")
+
+        if query and not interactive:
+            # Non-interactive single query
+            results = search_engine.fuzzy_search(query, max_results=max_results)
+            _display_search_results_brief(results, query, console)
+        else:
+            # Interactive search session
+            session = InteractiveSearchSession(search_engine, console)
+            session.start_session()
+
+    except Exception as e:
+        console.print(f"❌ Search failed: {str(e)}", style="red")
+        raise typer.Exit(1)
+
+@inspect_app.command("patient")
+def inspect_patient(
+    files: List[Path] = typer.Option(
+        ...,
+        "-f",
+        "--file",
+        help="ZIP files to inspect"
+    ),
+    patient_id: Optional[str] = typer.Option(
+        None,
+        "--patient-id",
+        help="Specific patient ID to inspect"
+    ),
+    anonymize: bool = typer.Option(
+        False,
+        "--anonymize",
+        help="Anonymize patient identifiers"
+    ),
+    show_studies: bool = typer.Option(
+        True,
+        "--studies/--no-studies",
+        help="Show patient studies summary"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "-v",
+        "--verbose",
+        help="Enable verbose output"
+    )
+):
+    """
+    Inspect patient-level DICOM tags and demographics.
+    """
+    console.print("👤 Inspecting patient information...", style="blue")
+
+    try:
+        # Load hierarchical data
+        loader = HierarchicalDicomLoader(verbose=verbose)
+        data = loader.load_hierarchical_data(files)
+
+        # Filter by patient ID if specified
+        patients_to_show = {}
+        if patient_id:
+            # Look for exact or fuzzy match
+            found_patient = None
+            for pid, patient in data.patients.items():
+                if pid == patient_id or patient_id.lower() in pid.lower():
+                    found_patient = patient
+                    patients_to_show[pid] = patient
+                    break
+
+            if not found_patient:
+                console.print(f"❌ Patient ID '{patient_id}' not found", style="red")
+                _list_available_patients(data.patients, console)
+                return
+        else:
+            patients_to_show = data.patients
+
+        # Display patient information
+        _display_patient_info(patients_to_show, data, anonymize, show_studies, console)
+
+    except Exception as e:
+        console.print(f"❌ Patient inspection failed: {str(e)}", style="red")
+        raise typer.Exit(1)
+
+@inspect_app.command("study")
+def inspect_study(
+    files: List[Path] = typer.Option(
+        ...,
+        "-f",
+        "--file",
+        help="ZIP files to inspect"
+    ),
+    study_uid: Optional[str] = typer.Option(
+        None,
+        "--study-uid",
+        help="Specific study UID to inspect"
+    ),
+    patient_id: Optional[str] = typer.Option(
+        None,
+        "--patient-id",
+        help="Filter by patient ID"
+    ),
+    show_series: bool = typer.Option(
+        True,
+        "--series/--no-series",
+        help="Show study series overview"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "-v",
+        "--verbose",
+        help="Enable verbose output"
+    )
+):
+    """
+    Inspect study-level DICOM tags and acquisition details.
+    """
+    console.print("📚 Inspecting study information...", style="blue")
+
+    try:
+        # Load hierarchical data
+        loader = HierarchicalDicomLoader(verbose=verbose)
+        data = loader.load_hierarchical_data(files)
+
+        # Filter studies
+        studies_to_show = {}
+
+        if study_uid:
+            # Look for specific study
+            found_study = None
+            for uid, study in data.studies.items():
+                if uid == study_uid or study_uid in uid:
+                    found_study = study
+                    studies_to_show[uid] = study
+                    break
+
+            if not found_study:
+                console.print(f"❌ Study UID '{study_uid}' not found", style="red")
+                _list_available_studies(data.studies, console)
+                return
+        elif patient_id:
+            # Filter by patient
+            patient_found = False
+            for uid, study in data.studies.items():
+                if study.patient_id == patient_id or patient_id.lower() in study.patient_id.lower():
+                    studies_to_show[uid] = study
+                    patient_found = True
+
+            if not patient_found:
+                console.print(f"❌ No studies found for patient '{patient_id}'", style="red")
+                return
+        else:
+            studies_to_show = data.studies
+
+        # Display study information
+        _display_study_info(studies_to_show, data, show_series, console)
+
+    except Exception as e:
+        console.print(f"❌ Study inspection failed: {str(e)}", style="red")
+        raise typer.Exit(1)
+
+@inspect_app.command("series")
+def inspect_series(
+    files: List[Path] = typer.Option(
+        ...,
+        "-f",
+        "--file",
+        help="ZIP files to inspect"
+    ),
+    series_uid: Optional[str] = typer.Option(
+        None,
+        "--series-uid",
+        help="Specific series UID to inspect"
+    ),
+    study_uid: Optional[str] = typer.Option(
+        None,
+        "--study-uid",
+        help="Filter by study UID"
+    ),
+    show_instances: bool = typer.Option(
+        True,
+        "--instances/--no-instances",
+        help="Show series instances overview"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "-v",
+        "--verbose",
+        help="Enable verbose output"
+    )
+):
+    """
+    Inspect series-level DICOM tags and acquisition parameters.
+    """
+    console.print("🔬 Inspecting series information...", style="blue")
+
+    try:
+        # Load hierarchical data
+        loader = HierarchicalDicomLoader(verbose=verbose)
+        data = loader.load_hierarchical_data(files)
+
+        # Filter series
+        series_to_show = {}
+
+        if series_uid:
+            # Look for specific series
+            found_series = None
+            for uid, series in data.series.items():
+                if uid == series_uid or series_uid in uid:
+                    found_series = series
+                    series_to_show[uid] = series
+                    break
+
+            if not found_series:
+                console.print(f"❌ Series UID '{series_uid}' not found", style="red")
+                _list_available_series(data.series, console)
+                return
+        elif study_uid:
+            # Filter by study
+            study_found = False
+            for uid, series in data.series.items():
+                if series.study_uid == study_uid or study_uid in series.study_uid:
+                    series_to_show[uid] = series
+                    study_found = True
+
+            if not study_found:
+                console.print(f"❌ No series found for study '{study_uid}'", style="red")
+                return
+        else:
+            series_to_show = data.series
+
+        # Display series information
+        _display_series_info(series_to_show, data, show_instances, console)
+
+    except Exception as e:
+        console.print(f"❌ Series inspection failed: {str(e)}", style="red")
+        raise typer.Exit(1)
+
+@inspect_app.command("instance")
+def inspect_instance(
+    files: List[Path] = typer.Option(
+        ...,
+        "-f",
+        "--file",
+        help="ZIP files to inspect"
+    ),
+    sop_uid: Optional[str] = typer.Option(
+        None,
+        "--sop-uid",
+        help="Specific SOP instance UID to inspect"
+    ),
+    series_uid: Optional[str] = typer.Option(
+        None,
+        "--series-uid",
+        help="Filter by series UID"
+    ),
+    show_all_tags: bool = typer.Option(
+        False,
+        "--all-tags",
+        help="Show all DICOM tags (not just key ones)"
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        help="Maximum number of instances to display"
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "-v",
+        "--verbose",
+        help="Enable verbose output"
+    )
+):
+    """
+    Inspect instance-level DICOM tags and technical parameters.
+    """
+    console.print("🖼️  Inspecting instance information...", style="blue")
+
+    try:
+        # Load hierarchical data
+        loader = HierarchicalDicomLoader(verbose=verbose)
+        data = loader.load_hierarchical_data(files)
+
+        # Filter instances
+        instances_to_show = {}
+
+        if sop_uid:
+            # Look for specific instance
+            found_instance = None
+            for uid, instance in data.instances.items():
+                if uid == sop_uid or sop_uid in uid:
+                    found_instance = instance
+                    instances_to_show[uid] = instance
+                    break
+
+            if not found_instance:
+                console.print(f"❌ SOP Instance UID '{sop_uid}' not found", style="red")
+                _list_available_instances(data.instances, console, limit=5)
+                return
+        elif series_uid:
+            # Filter by series
+            series_found = False
+            for uid, instance in data.instances.items():
+                if instance.series_uid == series_uid or series_uid in instance.series_uid:
+                    instances_to_show[uid] = instance
+                    series_found = True
+
+                    # Respect limit
+                    if len(instances_to_show) >= limit:
+                        break
+
+            if not series_found:
+                console.print(f"❌ No instances found for series '{series_uid}'", style="red")
+                return
+        else:
+            # Show first N instances
+            instances_to_show = dict(list(data.instances.items())[:limit])
+
+        # Display instance information
+        _display_instance_info(instances_to_show, data, show_all_tags, console)
+
+    except Exception as e:
+        console.print(f"❌ Instance inspection failed: {str(e)}", style="red")
+        raise typer.Exit(1)
 
 @app.command()
 def compare(
@@ -1250,6 +1621,344 @@ def _create_detailed_worksheet(ws, summary: 'ComparisonSummary') -> None:
                 pass
         adjusted_width = min(max_length + 2, 30)
         ws.column_dimensions[column_letter].width = adjusted_width
+
+# Helper functions for inspect commands
+
+def _display_search_results_brief(results: List, query: str, console: Console):
+    """Display search results in brief format"""
+    if not results:
+        console.print(f"No results found for '{query}'", style="yellow")
+        return
+
+    console.print(f"\n🔍 Search results for '{query}' ({len(results)} matches):\n")
+
+    for i, result in enumerate(results, 1):
+        tag_info = result.tag_info
+        level_color = _get_level_display_color(result.hierarchy_level)
+
+        console.print(f"{i}. [bold]{tag_info.keyword}[/bold] ({tag_info.tag_number})")
+        console.print(f"   {tag_info.name}")
+        console.print(f"   Level: [{level_color}]{result.hierarchy_level}[/{level_color}] | "
+                     f"Score: {result.similarity_score:.3f} | Occurrences: {result.occurrence_count}")
+
+        if result.sample_values:
+            values = ", ".join([f'"{v}"' for v in result.sample_values[:3]])
+            console.print(f"   Values: {values}", style="dim")
+        console.print()
+
+def _list_available_patients(patients: dict, console: Console):
+    """List available patients"""
+    console.print(f"\nAvailable patients ({len(patients)}):")
+    for i, (patient_id, patient) in enumerate(list(patients.items())[:10]):
+        name = patient.demographics.get('PatientName', 'UNKNOWN')
+        if hasattr(name, 'value'):
+            name = name.value
+        console.print(f"  {i+1}. {patient_id} ({name})", style="dim")
+
+    if len(patients) > 10:
+        console.print(f"  ... and {len(patients) - 10} more patients", style="dim")
+
+def _list_available_studies(studies: dict, console: Console):
+    """List available studies"""
+    console.print(f"\nAvailable studies ({len(studies)}):")
+    for i, (study_uid, study) in enumerate(list(studies.items())[:10]):
+        desc = study.metadata.get('StudyDescription', 'UNKNOWN')
+        if hasattr(desc, 'value'):
+            desc = desc.value
+        console.print(f"  {i+1}. {study_uid[:20]}... ({desc})", style="dim")
+
+    if len(studies) > 10:
+        console.print(f"  ... and {len(studies) - 10} more studies", style="dim")
+
+def _list_available_series(series: dict, console: Console):
+    """List available series"""
+    console.print(f"\nAvailable series ({len(series)}):")
+    for i, (series_uid, series) in enumerate(list(series.items())[:10]):
+        desc = series.metadata.get('SeriesDescription', 'UNKNOWN')
+        modality = series.metadata.get('Modality', 'UNKNOWN')
+        if hasattr(desc, 'value'):
+            desc = desc.value
+        if hasattr(modality, 'value'):
+            modality = modality.value
+        console.print(f"  {i+1}. {series_uid[:20]}... ({modality} - {desc})", style="dim")
+
+    if len(series) > 10:
+        console.print(f"  ... and {len(series) - 10} more series", style="dim")
+
+def _list_available_instances(instances: dict, console: Console, limit: int = 10):
+    """List available instances"""
+    console.print(f"\nAvailable instances ({len(instances)} total, showing {min(limit, len(instances))}):")
+    for i, (sop_uid, instance) in enumerate(list(instances.items())[:limit]):
+        instance_num = instance.metadata.get('InstanceNumber', 'UNKNOWN')
+        if hasattr(instance_num, 'value'):
+            instance_num = instance_num.value
+        console.print(f"  {i+1}. {sop_uid[:20]}... (Instance #{instance_num})", style="dim")
+
+def _display_patient_info(patients: dict, data, anonymize: bool, show_studies: bool, console: Console):
+    """Display patient information"""
+
+    if not patients:
+        console.print("No patients found", style="yellow")
+        return
+
+    for patient_id, patient in patients.items():
+        # Patient demographics table
+        demo_table = Table(title=f"👤 Patient: {patient_id}")
+        demo_table.add_column("Tag", style="cyan", width=20)
+        demo_table.add_column("Value", style="white", width=40)
+
+        # Display key patient tags
+        patient_tags = ['PatientName', 'PatientID', 'PatientBirthDate', 'PatientSex',
+                       'PatientAge', 'PatientWeight', 'PatientSize']
+
+        for tag in patient_tags:
+            tag_info = patient.demographics.get(tag)
+            if tag_info:
+                value = tag_info.value
+                if anonymize and tag in ['PatientName', 'PatientID']:
+                    value = f"ANON_{hash(str(value)) % 10000:04d}"
+                demo_table.add_row(tag, str(value))
+
+        demo_table.add_row("Total Instances", str(patient.total_instances))
+        demo_table.add_row("Studies Count", str(len(patient.studies)))
+        demo_table.add_row("Source Files", ", ".join(patient.file_sources))
+
+        console.print(demo_table)
+
+        # Show studies if requested
+        if show_studies and patient.studies:
+            studies_table = Table(title="📚 Studies")
+            studies_table.add_column("Study Date", style="cyan")
+            studies_table.add_column("Description", style="white", width=30)
+            studies_table.add_column("Series", justify="right", style="yellow")
+            studies_table.add_column("Instances", justify="right", style="green")
+
+            for study_uid in patient.studies:
+                study = data.studies.get(study_uid)
+                if study:
+                    study_date = study.metadata.get('StudyDate', 'UNKNOWN')
+                    study_desc = study.metadata.get('StudyDescription', 'UNKNOWN')
+
+                    if hasattr(study_date, 'value'):
+                        study_date = study_date.value
+                    if hasattr(study_desc, 'value'):
+                        study_desc = study_desc.value
+
+                    # Format date if possible
+                    if study_date != 'UNKNOWN' and len(str(study_date)) == 8:
+                        try:
+                            date_str = str(study_date)
+                            study_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                        except:
+                            pass
+
+                    studies_table.add_row(
+                        str(study_date)[:10],
+                        str(study_desc)[:30],
+                        str(len(study.series)),
+                        str(study.total_instances)
+                    )
+
+            console.print(studies_table)
+        console.print()  # Space between patients
+
+def _display_study_info(studies: dict, data, show_series: bool, console: Console):
+    """Display study information"""
+
+    if not studies:
+        console.print("No studies found", style="yellow")
+        return
+
+    for study_uid, study in studies.items():
+        # Study metadata table
+        study_table = Table(title=f"📚 Study: {study_uid[:30]}...")
+        study_table.add_column("Tag", style="cyan", width=25)
+        study_table.add_column("Value", style="white", width=50)
+
+        # Display key study tags
+        study_tags = ['StudyDate', 'StudyTime', 'StudyDescription', 'StudyID',
+                     'AccessionNumber', 'ReferringPhysicianName', 'InstitutionName']
+
+        for tag in study_tags:
+            tag_info = study.metadata.get(tag)
+            if tag_info:
+                value = str(tag_info.value)
+
+                # Format dates and times
+                if tag == 'StudyDate' and len(value) == 8:
+                    try:
+                        value = f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+                    except:
+                        pass
+                elif tag == 'StudyTime' and len(value) >= 6:
+                    try:
+                        value = f"{value[:2]}:{value[2:4]}:{value[4:6]}"
+                    except:
+                        pass
+
+                study_table.add_row(tag, value[:50])
+
+        study_table.add_row("Patient ID", study.patient_id)
+        study_table.add_row("Series Count", str(len(study.series)))
+        study_table.add_row("Total Instances", str(study.total_instances))
+        study_table.add_row("Source Files", ", ".join(study.file_sources))
+
+        console.print(study_table)
+
+        # Show series if requested
+        if show_series and study.series:
+            series_table = Table(title="🔬 Series")
+            series_table.add_column("Series #", style="cyan")
+            series_table.add_column("Modality", style="blue")
+            series_table.add_column("Description", style="white", width=30)
+            series_table.add_column("Instances", justify="right", style="green")
+
+            for series_uid in study.series:
+                series = data.series.get(series_uid)
+                if series:
+                    series_num = series.metadata.get('SeriesNumber', 'UNKNOWN')
+                    modality = series.metadata.get('Modality', 'UNKNOWN')
+                    series_desc = series.metadata.get('SeriesDescription', 'UNKNOWN')
+
+                    if hasattr(series_num, 'value'):
+                        series_num = series_num.value
+                    if hasattr(modality, 'value'):
+                        modality = modality.value
+                    if hasattr(series_desc, 'value'):
+                        series_desc = series_desc.value
+
+                    series_table.add_row(
+                        str(series_num),
+                        str(modality),
+                        str(series_desc)[:30],
+                        str(len(series.instances))
+                    )
+
+            console.print(series_table)
+        console.print()
+
+def _display_series_info(series: dict, data, show_instances: bool, console: Console):
+    """Display series information"""
+
+    if not series:
+        console.print("No series found", style="yellow")
+        return
+
+    for series_uid, series in series.items():
+        # Series metadata table
+        series_table = Table(title=f"🔬 Series: {series_uid[:30]}...")
+        series_table.add_column("Tag", style="cyan", width=25)
+        series_table.add_column("Value", style="white", width=50)
+
+        # Display key series tags
+        series_tags = ['SeriesNumber', 'SeriesDate', 'SeriesTime', 'SeriesDescription',
+                      'Modality', 'ProtocolName', 'BodyPartExamined', 'PatientPosition']
+
+        for tag in series_tags:
+            tag_info = series.metadata.get(tag)
+            if tag_info:
+                value = str(tag_info.value)
+
+                # Format dates and times
+                if tag == 'SeriesDate' and len(value) == 8:
+                    try:
+                        value = f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+                    except:
+                        pass
+                elif tag == 'SeriesTime' and len(value) >= 6:
+                    try:
+                        value = f"{value[:2]}:{value[2:4]}:{value[4:6]}"
+                    except:
+                        pass
+
+                series_table.add_row(tag, value[:50])
+
+        series_table.add_row("Study UID", series.study_uid[:30] + "...")
+        series_table.add_row("Instance Count", str(len(series.instances)))
+        series_table.add_row("Source Files", ", ".join(series.file_sources))
+
+        console.print(series_table)
+
+        # Show instances if requested
+        if show_instances and series.instances:
+            instances_table = Table(title="🖼️  Instances")
+            instances_table.add_column("Instance #", style="cyan")
+            instances_table.add_column("SOP Class", style="blue", width=25)
+            instances_table.add_column("File Path", style="white", width=40)
+
+            for sop_uid in series.instances[:10]:  # Limit to first 10
+                instance = data.instances.get(sop_uid)
+                if instance:
+                    instance_num = instance.metadata.get('InstanceNumber', 'UNKNOWN')
+                    sop_class = instance.metadata.get('SOPClassUID', 'UNKNOWN')
+
+                    if hasattr(instance_num, 'value'):
+                        instance_num = instance_num.value
+                    if hasattr(sop_class, 'value'):
+                        sop_class = sop_class.value
+
+                    # Shorten SOP class for display
+                    if len(str(sop_class)) > 25:
+                        sop_class = str(sop_class)[-25:] + "..."
+
+                    instances_table.add_row(
+                        str(instance_num),
+                        str(sop_class)[:25],
+                        str(instance.file_path)[:40]
+                    )
+
+            if len(series.instances) > 10:
+                instances_table.add_row("...", f"and {len(series.instances) - 10} more", "...")
+
+            console.print(instances_table)
+        console.print()
+
+def _display_instance_info(instances: dict, data, show_all_tags: bool, console: Console):
+    """Display instance information"""
+
+    if not instances:
+        console.print("No instances found", style="yellow")
+        return
+
+    for sop_uid, instance in instances.items():
+        # Instance metadata table
+        instance_table = Table(title=f"🖼️  Instance: {sop_uid[:30]}...")
+        instance_table.add_column("Tag", style="cyan", width=25)
+        instance_table.add_column("Value", style="white", width=50)
+
+        if show_all_tags:
+            # Show all tags
+            for tag_keyword, tag_info in instance.metadata.items():
+                value = str(tag_info.value)
+                instance_table.add_row(f"{tag_keyword} ({tag_info.tag_number})", value[:50])
+        else:
+            # Display key instance tags
+            instance_tags = ['InstanceNumber', 'SOPClassUID', 'SOPInstanceUID',
+                           'ImageType', 'Rows', 'Columns', 'BitsAllocated',
+                           'PhotometricInterpretation', 'SliceLocation', 'SliceThickness']
+
+            for tag in instance_tags:
+                tag_info = instance.metadata.get(tag)
+                if tag_info:
+                    value = str(tag_info.value)
+                    instance_table.add_row(tag, value[:50])
+
+        instance_table.add_row("Series UID", instance.series_uid[:30] + "...")
+        instance_table.add_row("Source File", instance.source_file)
+        instance_table.add_row("File Path", str(instance.file_path))
+
+        console.print(instance_table)
+        console.print()
+
+def _get_level_display_color(level: str) -> str:
+    """Get color for hierarchy level display"""
+    colors = {
+        'patient': 'green',
+        'study': 'blue',
+        'series': 'yellow',
+        'instance': 'magenta'
+    }
+    return colors.get(level, 'white')
 
 if __name__ == "__main__":
     app()
