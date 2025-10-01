@@ -30,6 +30,50 @@ from dicom_compare.models import (
 
 console = Console()
 
+class TagAutocomplete:
+    """Autocomplete engine for DICOM tag keywords"""
+
+    def __init__(self, available_keywords: List[str]):
+        self.available_keywords = sorted(set(available_keywords), key=str.lower)
+        self.keyword_lookup = {kw.lower(): kw for kw in self.available_keywords}
+
+    def get_suggestions(self, partial_text: str, max_suggestions: int = 5) -> List[str]:
+        """Get autocomplete suggestions for partial text input"""
+        if not partial_text.strip():
+            return []
+
+        partial_lower = partial_text.lower()
+        suggestions = []
+
+        # First: exact prefix matches (case-insensitive)
+        prefix_matches = [
+            kw for kw in self.available_keywords
+            if kw.lower().startswith(partial_lower)
+        ]
+        suggestions.extend(prefix_matches)
+
+        # Second: fuzzy matches that contain the partial text
+        if len(suggestions) < max_suggestions:
+            fuzzy_matches = [
+                kw for kw in self.available_keywords
+                if partial_lower in kw.lower() and kw not in suggestions
+            ]
+            suggestions.extend(fuzzy_matches)
+
+        # Limit results and sort by length (shorter matches first)
+        return sorted(suggestions[:max_suggestions], key=len)
+
+    def find_best_match(self, partial_text: str) -> Optional[str]:
+        """Find the single best match for completion"""
+        suggestions = self.get_suggestions(partial_text, max_suggestions=1)
+        return suggestions[0] if suggestions else None
+
+    def get_completion(self, partial_text: str, suggestion: str) -> str:
+        """Get the completion text to append to partial input"""
+        if suggestion.lower().startswith(partial_text.lower()):
+            return suggestion[len(partial_text):]
+        return ""
+
 class TagSearchEngine:
     """Fuzzy search engine for DICOM tags across hierarchical data"""
 
@@ -202,6 +246,18 @@ class TagSearchEngine:
                 }
         return None
 
+    def get_available_tag_keywords(self, level_filter: Optional[str] = None) -> List[str]:
+        """Get all available DICOM tag keywords, optionally filtered by hierarchy level"""
+        keywords = set()
+
+        for tag_key, tag_data in self.tag_index.items():
+            # Apply level filter if specified
+            if level_filter and tag_data['level'] != level_filter:
+                continue
+            keywords.add(tag_data['keyword'])
+
+        return list(keywords)
+
     def _build_tag_index(self) -> Dict[str, Dict[str, Any]]:
         """Build searchable index of all tags across hierarchy levels"""
         tag_index = {}
@@ -289,10 +345,15 @@ class InteractiveSearchSession:
 
         # Search mode management
         self.search_modes = [
-            'fuzzy', 'exact', 'tag', 'value',
+            'tag', 'fuzzy', 'exact', 'value',
             'filter_patient', 'filter_study', 'filter_series', 'filter_instance'
         ]
-        self.current_mode = 'fuzzy'  # Default mode
+        self.current_mode = 'tag'  # Default mode
+
+        # Autocomplete support
+        self.autocomplete = None
+        self.current_suggestions = []
+        self.selected_suggestion_index = -1
 
     def _cycle_search_mode(self):
         """Cycle to the next search mode"""
@@ -341,6 +402,124 @@ class InteractiveSearchSession:
 
         return False
 
+    def _init_autocomplete(self):
+        """Initialize autocomplete engine for current mode and filter"""
+        if self.current_mode == 'tag':
+            keywords = self.search_engine.get_available_tag_keywords(self.current_filter)
+            self.autocomplete = TagAutocomplete(keywords)
+        else:
+            self.autocomplete = None
+
+    def _update_suggestions(self, partial_text: str):
+        """Update current suggestions based on partial input"""
+        if self.autocomplete and self.current_mode == 'tag':
+            self.current_suggestions = self.autocomplete.get_suggestions(partial_text, max_suggestions=5)
+            self.selected_suggestion_index = 0 if self.current_suggestions else -1
+        else:
+            self.current_suggestions = []
+            self.selected_suggestion_index = -1
+
+
+    def _display_suggestions_inline(self, current_input: str):
+        """Display suggestions inline with the prompt"""
+        if not self.current_suggestions:
+            return ""
+
+        # If we have exact match and multiple suggestions, show alternatives
+        exact_match = None
+        for suggestion in self.current_suggestions:
+            if suggestion.lower() == current_input.lower():
+                exact_match = suggestion
+                break
+
+        if exact_match and len(self.current_suggestions) > 1:
+            # Show other suggestions when we have an exact match
+            other_suggestions = [s for s in self.current_suggestions if s.lower() != current_input.lower()]
+            if other_suggestions:
+                if len(other_suggestions) == 1:
+                    return f" (or {other_suggestions[0]})"
+                elif len(other_suggestions) <= 3:
+                    others = ", ".join(other_suggestions)
+                    return f" (or {others})"
+                else:
+                    others = ", ".join(other_suggestions[:2])
+                    return f" (or {others}, +{len(other_suggestions)-2} more)"
+
+        # Show first suggestion as completion hint if it starts with our input
+        first_suggestion = self.current_suggestions[0]
+        if first_suggestion.lower().startswith(current_input.lower()) and len(current_input) > 0:
+            completion = first_suggestion[len(current_input):]
+
+            # If there are other suggestions, show a preview
+            if len(self.current_suggestions) > 1:
+                if len(self.current_suggestions) == 2:
+                    second = self.current_suggestions[1]
+                    return f" [{completion}] (or {second})"
+                elif len(self.current_suggestions) <= 4:
+                    others = ", ".join(self.current_suggestions[1:])
+                    return f" [{completion}] (or {others})"
+                else:
+                    others = ", ".join(self.current_suggestions[1:3])
+                    remaining = len(self.current_suggestions) - 3
+                    return f" [{completion}] (or {others}, +{remaining} more)"
+            else:
+                return f" [{completion}]"
+
+        # Fallback: just show count with preview
+        elif self.current_suggestions:
+            if len(self.current_suggestions) <= 3:
+                preview = ", ".join(self.current_suggestions)
+                return f" (Tab: {preview})"
+            else:
+                preview = ", ".join(self.current_suggestions[:3])
+                return f" (Tab: {preview}, +{len(self.current_suggestions)-3} more)"
+
+        return ""
+
+
+    def _display_comprehensive_suggestions_table(self, user_input: str):
+        """Display a comprehensive table of tag suggestions for invalid input"""
+        if not self.autocomplete:
+            return
+
+        # Get suggestions based on user input
+        all_suggestions = self.autocomplete.get_suggestions(user_input, max_suggestions=30)
+
+        if not all_suggestions:
+            # If no matches for user input, show some common tags
+            all_keywords = self.search_engine.get_available_tag_keywords(self.current_filter)
+            # Show first 20 alphabetically as fallback
+            all_suggestions = sorted(all_keywords)[:20]
+
+        if not all_suggestions:
+            self.console.print("No tag suggestions available.", style="yellow")
+            return
+
+        # Create table
+        table = Table(title=f"Did you mean one of these? (searched for: '{user_input}')")
+        table.add_column("Tag Keyword", style="cyan", no_wrap=True)
+        table.add_column("Level", style="yellow", justify="center")
+        table.add_column("Description", style="white")
+
+        # Add suggestions to table
+        for suggestion in all_suggestions:
+            # Get tag details to determine level and description
+            level = "Unknown"
+            description = suggestion
+
+            # Try to find the tag in our index to get more details
+            for tag_key, tag_data in self.search_engine.tag_index.items():
+                if tag_data['keyword'] == suggestion:
+                    level = tag_data['level'].title()
+                    description = tag_data['name'] or suggestion
+                    break
+
+            table.add_row(suggestion, level, description)
+
+        self.console.print()
+        self.console.print(table)
+        self.console.print("\n[dim]Type any of these keywords exactly to get details.[/dim]")
+
     def _get_user_input_with_tab_cycling(self) -> str:
         """Get user input with Tab cycling support"""
         prompt = self._get_mode_prompt()
@@ -362,34 +541,38 @@ class InteractiveSearchSession:
             return input(prompt)
 
     def _unix_input_with_tab(self, prompt: str) -> str:
-        """Unix/Linux input handler with Tab detection"""
-        self.console.print(f"[dim]Press Tab to cycle modes. Current mode: {self.current_mode}[/dim]")
-        sys.stdout.write(prompt)
-        sys.stdout.flush()
+        """Unix/Linux input handler - simplified without complex autocomplete"""
+        # Initialize autocomplete for inline hints only
+        self._init_autocomplete()
+
+        if self.current_mode == 'tag':
+            self.console.print(f"[dim]Type tag keyword (inline hints available)[/dim]")
+        else:
+            self.console.print(f"[dim]Press Tab to cycle modes. Current mode: {self.current_mode}[/dim]")
 
         old_settings = termios.tcgetattr(sys.stdin)
         try:
             tty.setraw(sys.stdin.fileno())
             input_chars = []
 
+            # Simple initial prompt
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+
             while True:
                 char = sys.stdin.read(1)
 
-                # Tab character (ASCII 9)
+                # Tab character - only for mode cycling
                 if ord(char) == 9:
-                    # Clear current line and show new mode
-                    sys.stdout.write('\r' + ' ' * (len(prompt) + len(input_chars)) + '\r')
+                    # Tab cycles modes
                     self._cycle_search_mode()
-                    new_prompt = self._get_mode_prompt()
-                    sys.stdout.write(f"[{self.current_mode} mode] {new_prompt}")
-                    sys.stdout.flush()
-                    prompt = new_prompt
-                    continue
+                    sys.stdout.write(f'\n[Switched to {self.current_mode} mode]\n')
+                    return ''  # Return empty to restart input with new mode
 
                 # Enter key
                 elif ord(char) == 13:  # \r
                     sys.stdout.write('\n')
-                    break
+                    return ''.join(input_chars)
 
                 # Backspace
                 elif ord(char) == 127 or ord(char) == 8:
@@ -397,10 +580,15 @@ class InteractiveSearchSession:
                         input_chars.pop()
                         sys.stdout.write('\b \b')
                         sys.stdout.flush()
-                    continue
+
+                        # Update suggestions silently for inline hints
+                        if self.current_mode == 'tag' and self.autocomplete:
+                            current_input = ''.join(input_chars)
+                            self._update_suggestions(current_input)
 
                 # Ctrl+C
                 elif ord(char) == 3:
+                    sys.stdout.write('\n')
                     raise KeyboardInterrupt
 
                 # Regular character
@@ -409,14 +597,26 @@ class InteractiveSearchSession:
                     sys.stdout.write(char)
                     sys.stdout.flush()
 
+                    # Update suggestions silently for inline hints
+                    if self.current_mode == 'tag' and self.autocomplete:
+                        current_input = ''.join(input_chars)
+                        self._update_suggestions(current_input)
+
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
         return ''.join(input_chars)
 
     def _windows_input_with_tab(self, prompt: str) -> str:
-        """Windows input handler with Tab detection"""
-        self.console.print(f"[dim]Press Tab to cycle modes. Current mode: {self.current_mode}[/dim]")
+        """Windows input handler - simplified without complex autocomplete"""
+        # Initialize autocomplete for inline hints only
+        self._init_autocomplete()
+
+        if self.current_mode == 'tag':
+            self.console.print(f"[dim]Type tag keyword (inline hints available)[/dim]")
+        else:
+            self.console.print(f"[dim]Press Tab to cycle modes. Current mode: {self.current_mode}[/dim]")
+
         sys.stdout.write(prompt)
         sys.stdout.flush()
 
@@ -425,21 +625,22 @@ class InteractiveSearchSession:
         while True:
             char = msvcrt.getch()
 
-            # Tab character
-            if char == b'\t':
-                # Clear current line and show new mode
-                sys.stdout.write('\r' + ' ' * (len(prompt) + len(input_chars)) + '\r')
-                self._cycle_search_mode()
-                new_prompt = self._get_mode_prompt()
-                sys.stdout.write(f"[{self.current_mode} mode] {new_prompt}")
-                sys.stdout.flush()
-                prompt = new_prompt
+            # Handle special keys - ignore arrows for simplicity
+            if char == b'\xe0':
+                msvcrt.getch()  # Consume the second byte
                 continue
+
+            # Tab character - only for mode cycling
+            elif char == b'\t':
+                # Tab cycles modes
+                self._cycle_search_mode()
+                sys.stdout.write(f'\n[Switched to {self.current_mode} mode]\n')
+                return ''  # Return empty to restart input with new mode
 
             # Enter key
             elif char == b'\r':
                 sys.stdout.write('\n')
-                break
+                return ''.join(input_chars)
 
             # Backspace
             elif char == b'\x08':
@@ -447,10 +648,15 @@ class InteractiveSearchSession:
                     input_chars.pop()
                     sys.stdout.write('\b \b')
                     sys.stdout.flush()
-                continue
+
+                    # Update suggestions silently for inline hints
+                    if self.current_mode == 'tag' and self.autocomplete:
+                        current_input = ''.join(input_chars)
+                        self._update_suggestions(current_input)
 
             # Ctrl+C
             elif char == b'\x03':
+                sys.stdout.write('\n')
                 raise KeyboardInterrupt
 
             # Regular character
@@ -459,12 +665,17 @@ class InteractiveSearchSession:
                 sys.stdout.write(char.decode('utf-8'))
                 sys.stdout.flush()
 
+                # Update suggestions silently for inline hints
+                if self.current_mode == 'tag' and self.autocomplete:
+                    current_input = ''.join(input_chars)
+                    self._update_suggestions(current_input)
+
         return ''.join(input_chars)
 
     def start_session(self) -> None:
         """Start interactive search session"""
         self.console.print("\n🔍 Interactive DICOM Tag Search", style="bold blue")
-        self.console.print("Press Tab to cycle search modes, type 'help' for commands, 'quit' to exit\n")
+        self.console.print("Starting in [bold]tag mode[/bold] - Press Tab to cycle modes, type 'help' for commands, 'quit' to exit\n")
 
         # Show initial statistics
         stats = self.search_engine.get_tag_statistics()
@@ -473,6 +684,8 @@ class InteractiveSearchSession:
         while True:
             try:
                 command = self._get_user_input_with_tab_cycling().strip()
+
+                # Handle mode switching (empty return from input handler)
                 if not command:
                     continue
 
@@ -567,7 +780,9 @@ class InteractiveSearchSession:
         if details:
             self._display_tag_details(details)
         else:
-            self.console.print(f"Tag '{tag_keyword}' not found", style="yellow")
+            # Tag not found - show comprehensive suggestions table
+            self.console.print(f"Tag '{tag_keyword}' not found.", style="yellow")
+            self._display_comprehensive_suggestions_table(tag_keyword)
 
     def _handle_value_search(self, value: str):
         """Handle value search command"""
@@ -702,18 +917,29 @@ class InteractiveSearchSession:
     def _display_help(self):
         """Display help information"""
         help_text = f"""
-[bold blue]Enhanced Search Interface:[/bold blue]
+[bold blue]Interactive Search Interface:[/bold blue]
 
-[bold green]🔄 Tab Cycling Mode (Recommended):[/bold green]
+[bold green]🔄 Search Modes:[/bold green]
 Press [cyan]Tab[/cyan] to cycle through search modes:
+• [yellow]tag[/yellow] - Get tag details by keyword [bold green](DEFAULT - with smart suggestions!)[/bold green]
 • [yellow]fuzzy[/yellow] - Fuzzy search all tags
 • [yellow]exact[/yellow] - Exact match search
-• [yellow]tag[/yellow] - Get tag details by keyword
 • [yellow]value[/yellow] - Search by tag values
 • [yellow]patient/study/series/instance[/yellow] - Filter modes
 
 Current mode: [bold]{self.current_mode}[/bold]
-Just type your search term directly in any mode!
+
+[bold green]🎯 Tag Mode Features:[/bold green]
+When in [yellow]tag[/yellow] mode:
+• Type partial keywords → see inline hints: [dim]patie[/dim] → [dim]patientid (or PatientName, +3 more)[/dim]
+• Enter valid tag keyword → see detailed tag information
+• Enter invalid keyword → see comprehensive suggestions table with all options!
+
+[bold blue]Keyboard Shortcuts:[/bold blue]
+• [cyan]Tab[/cyan] - Cycle through search modes
+• [cyan]Enter[/cyan] - Search with current input
+• [cyan]Backspace[/cyan] - Delete characters
+• [cyan]Ctrl+C[/cyan] - Exit search session
 
 [bold blue]Classic Commands (Still Available):[/bold blue]
 
@@ -730,15 +956,16 @@ Just type your search term directly in any mode!
 [cyan]quit/exit[/cyan]         - Exit search mode
 
 [yellow]Quick Start:[/yellow]
-1. Press Tab to cycle to desired search mode
-2. Type your search term directly (no command prefix needed)
-3. Press Enter to search
+1. Press Tab to cycle to [yellow]tag[/yellow] mode
+2. Type tag names like "PatientID", "StudyDate", etc.
+3. See inline hints as you type partial names
+4. Press Enter - get tag details or comprehensive suggestions!
 
 [yellow]Examples:[/yellow]
-  [Tab to fuzzy mode] → patient name
-  [Tab to exact mode] → PatientID
-  [Tab to tag mode] → StudyDate
-  [Tab to value mode] → Smith^John
+  [Tab to tag mode] → PatientID[Enter] → See tag details
+  [Tab to tag mode] → patie[Enter] → See suggestions table
+  [Tab to fuzzy mode] → patient name[Enter] → Fuzzy search
+  [Tab to value mode] → Smith^John[Enter] → Value search
         """
         self.console.print(Panel(help_text, title="Interactive Search Help", expand=False))
 
